@@ -1,0 +1,2057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Non-Live Bucketing Analysis | noon Darkstore Ops</title>
+<style>
+/* ── RESET + BASE ────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#eef1f6;font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a2233}
+.wrap{max-width:1120px;margin:0 auto;padding:16px 16px 40px}
+
+/* ── STICKY FILTER PANEL ─────────────────────────── */
+.filter-panel{
+  position:sticky;top:0;z-index:100;
+  background:linear-gradient(135deg,#0d1b3e,#1a3166);
+  border-radius:10px;padding:14px 20px;margin-bottom:16px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-wrap:wrap;gap:10px;
+  box-shadow:0 4px 18px rgba(13,27,62,.35)
+}
+.filter-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.filter-label{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#c9a227;margin-right:4px}
+.period-btn{
+  padding:6px 16px;border-radius:5px;border:1px solid rgba(201,162,39,.4);
+  background:transparent;color:rgba(255,255,255,.65);font-size:11px;font-weight:600;
+  cursor:pointer;transition:all .15s;letter-spacing:.05em
+}
+.period-btn:hover{border-color:#c9a227;color:#c9a227}
+.period-btn.active{background:#c9a227;color:#0d1b3e;border-color:#c9a227}
+.week-select{
+  padding:5px 10px;border-radius:5px;border:1px solid rgba(201,162,39,.4);
+  background:transparent;color:rgba(255,255,255,.8);font-size:11px;cursor:pointer;
+  outline:none
+}
+.week-select option{background:#0d1b3e;color:#fff}
+.filter-right{display:flex;gap:8px}
+.action-btn{
+  padding:7px 16px;border-radius:6px;font-size:11px;font-weight:700;
+  cursor:pointer;border:1px solid;display:inline-flex;align-items:center;gap:6px;
+  letter-spacing:.05em;transition:all .15s
+}
+.btn-csv{border-color:#27ae60;color:#27ae60;background:rgba(39,174,96,.1)}
+.btn-csv:hover{background:#27ae60;color:#fff}
+.btn-email{border-color:#4da6ff;color:#4da6ff;background:rgba(77,166,255,.1)}
+.btn-email:hover{background:#4da6ff;color:#fff}
+.period-display{font-size:10px;color:rgba(255,255,255,.45);letter-spacing:.5px;margin-top:3px;width:100%}
+
+/* ── HEADER ──────────────────────────────────────── */
+.main-header{
+  background:linear-gradient(135deg,#0d1b3e 0%,#1a3166 60%,#0d2752 100%);
+  border-radius:10px 10px 0 0;overflow:hidden
+}
+.mh-inner{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:20px 26px;flex-wrap:wrap;gap:12px
+}
+.brand-txt{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#c9a227;margin-bottom:4px}
+.h1{font-size:20px;font-weight:700;color:#fff;letter-spacing:-.3px}
+.gen-meta{font-size:11px;color:rgba(255,255,255,.5);margin-top:4px}
+.gen-dot{display:inline-block;width:6px;height:6px;background:#27ae60;border-radius:50%;margin-right:5px;vertical-align:middle;animation:pulse 2s ease infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.total-kpi-box{
+  background:rgba(201,162,39,.12);border:1px solid #c9a227;border-radius:7px;
+  padding:10px 18px;text-align:center
+}
+.tkl{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#c9a227;margin-bottom:4px}
+.tkv{font-size:22px;font-weight:800;color:#c9a227;line-height:1}
+.tks{font-size:10px;color:rgba(201,162,39,.7)}
+
+/* ── SECTION HEADER ──────────────────────────────── */
+.sec-hdr{
+  background:#1a3166;padding:9px 20px;
+  display:flex;align-items:center;gap:8px
+}
+.sec-hdr-rnd{border-radius:6px 6px 0 0}
+.sec-label{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#c9a227}
+.sec-badge{font-size:10px;color:rgba(255,255,255,.45);margin-left:auto}
+.sec-actions{display:flex;gap:5px;margin-left:8px}
+.sec-btn{
+  padding:3px 9px;border-radius:4px;font-size:10px;font-weight:600;
+  cursor:pointer;border:1px solid;letter-spacing:.04em;transition:all .13s;
+  display:inline-flex;align-items:center;gap:4px
+}
+.sec-btn-csv{border-color:rgba(39,174,96,.5);color:#27ae60;background:rgba(39,174,96,.08)}
+.sec-btn-csv:hover{background:#27ae60;color:#0d1b3e}
+.sec-btn-email{border-color:rgba(77,166,255,.5);color:#4da6ff;background:rgba(77,166,255,.08)}
+.sec-btn-email:hover{background:#4da6ff;color:#0d1b3e}
+
+/* ── KPI CARDS ───────────────────────────────────── */
+.kpi-grid{
+  display:grid;grid-template-columns:repeat(6,1fr);gap:0;
+  border:1px solid #dde3ef;border-top:none;background:#fff
+}
+.kpi-card{
+  padding:14px 12px;text-align:center;border-right:1px solid #eaedf5;position:relative
+}
+.kpi-card:last-child{border-right:none}
+.kpi-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:3px}
+.kpi-card.c-total::after{background:#0d1b3e}
+.kpi-card.c-fefo::after{background:#2196a6}
+.kpi-card.c-nfefo::after{background:#7a55cc}
+.kpi-card.c-9411::after{background:#c9a227}
+.kpi-card.c-n9411::after{background:#e05050}
+.kpi-card.c-qty::after{background:#27ae60}
+.kl{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#7a8aaa;margin-bottom:5px}
+.kv{font-size:20px;font-weight:800;color:#0d1b3e;line-height:1}
+.ks{font-size:10px;color:#9aaabb;margin-top:3px}
+.kpct{font-size:11px;font-weight:600;margin-top:2px}
+
+/* ── SPLIT BAR ───────────────────────────────────── */
+.split-section{
+  background:#fff;border:1px solid #dde3ef;border-top:none;
+  padding:12px 16px 14px
+}
+.split-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.split-name{font-size:10px;font-weight:700;letter-spacing:1px;width:110px;flex-shrink:0}
+.split-track{flex:1;height:8px;background:#eef0f5;border-radius:4px;overflow:hidden}
+.split-fill{height:100%;border-radius:4px;transition:width .6s ease}
+.split-pct{font-family:monospace;font-size:11px;font-weight:700;width:38px;text-align:right}
+.split-val{font-family:monospace;font-size:10px;color:#7a8aaa;width:60px;text-align:right}
+
+/* ── TABLES ──────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto;border:1px solid #dde3ef;border-top:none}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead tr{background:#0d1b3e}
+thead th{
+  padding:9px 11px;text-align:left;font-size:9.5px;font-weight:700;
+  letter-spacing:1px;text-transform:uppercase;color:#fff;white-space:nowrap;
+  border-right:1px solid #1e3060
+}
+thead th.gold{color:#c9a227}
+thead th.orange{color:#f5a623}
+thead th.red{color:#f05252}
+thead th.purple{color:#a78bfa}
+thead th.brown{color:#c8956a}
+thead th.blue{color:#4da6ff}
+thead th.green{color:#27ae60}
+thead th.r{text-align:right}
+tbody tr{border-bottom:1px solid #eaedf5;transition:background .1s}
+tbody tr:last-child{border-bottom:none}
+tbody tr:hover{background:#f5f7ff}
+tbody td{padding:8px 11px;white-space:nowrap;vertical-align:middle}
+tbody td.r{text-align:right;font-family:monospace;font-size:11px}
+tbody td.m{font-family:monospace;font-size:11px}
+.grand-tr{background:#0d1b3e!important}
+.grand-tr td{color:#c9a227!important;font-weight:800;font-size:12px;border-right:1px solid #1e3060}
+.grand-tr td.white{color:#fff!important}
+.grand-tr:hover{background:#0d1b3e!important}
+
+/* ── COLOR PILLS ─────────────────────────────────── */
+.tag{display:inline-block;padding:2px 7px;border-radius:3px;font-size:9.5px;font-weight:700;letter-spacing:.04em}
+.t-dmg{background:rgba(245,166,35,.15);color:#e07020}
+.t-exp{background:rgba(240,82,82,.15);color:#c0392b}
+.t-qal{background:rgba(167,139,250,.15);color:#7a55cc}
+.t-tp{background:rgba(180,100,50,.15);color:#8a5030}
+.t-lqd{background:rgba(77,166,255,.15);color:#2175c8}
+.t-rtv{background:rgba(39,174,96,.15);color:#1a8a50}
+.t-cir{background:rgba(150,100,50,.15);color:#7a5020}
+.t-other{background:#f0f0f8;color:#7a8aaa}
+.t-fefo{background:rgba(33,150,166,.15);color:#2196a6}
+.t-nf{background:rgba(122,85,204,.15);color:#7a55cc}
+.t-ds{background:rgba(240,82,82,.12);color:#c0392b}
+.t-ins{background:rgba(39,174,96,.12);color:#27ae60}
+
+/* ── HEAT CELLS ──────────────────────────────────── */
+.h1{background:rgba(192,57,43,.18);font-weight:700;color:#8a2010}
+.h2{background:rgba(192,57,43,.11);font-weight:600;color:#a03020}
+.h3{background:rgba(192,57,43,.06);color:#b04030}
+
+/* ── DEEP ANALYSIS GRID ──────────────────────────── */
+.da-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+.da-card{background:#fff;border-radius:8px;overflow:hidden;border:1px solid #dde3ef}
+.da-title{
+  background:#0d1b3e;padding:9px 14px;
+  font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase
+}
+.da-title.orange{background:#8a4010}
+.da-title.purple{background:#4a2a7a}
+.da-title.dark-blue{background:#0d2752}
+.da-title.teal{background:#0a4050}
+span.da-lbl{color:#c9a227}span.da-lbl2{color:#f5a623}span.da-lbl3{color:#a78bfa}span.da-lbl4{color:#4da6ff}
+
+/* ── PROGRESS BAR IN TABLE ───────────────────────── */
+.pbar-wrap{display:flex;align-items:center;gap:5px}
+.pbar{height:5px;border-radius:3px;flex-shrink:0}
+
+/* ── MARGIN UTIL ─────────────────────────────────── */
+.mt16{margin-top:16px}
+
+/* ── INFO NOTE ───────────────────────────────────── */
+.info-note{
+  background:#fff8f0;border-left:3px solid #e07020;
+  padding:8px 14px;font-size:11px;color:#6a4020;border-radius:0 4px 4px 0;margin-top:4px
+}
+
+/* ── MONTH SELECTOR ──────────────────────────────── */
+.month-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.month-btn{
+  padding:5px 13px;border-radius:5px;border:1px solid rgba(201,162,39,.35);
+  background:transparent;color:rgba(255,255,255,.6);font-size:11px;font-weight:600;
+  cursor:pointer;transition:all .15s;letter-spacing:.04em
+}
+.month-btn:hover{border-color:#c9a227;color:#c9a227}
+.month-btn.active{background:rgba(201,162,39,.2);color:#c9a227;border-color:#c9a227}
+.refresh-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:4px 10px;border-radius:4px;
+  background:rgba(39,174,96,.12);border:1px solid rgba(39,174,96,.3);
+  font-size:10px;color:#27ae60;font-family:monospace;letter-spacing:.04em
+}
+.refresh-dot{
+  width:6px;height:6px;background:#27ae60;border-radius:50%;
+  animation:pulse 2s ease infinite
+}
+.countdown{color:rgba(39,174,96,.7)}
+
+/* ── AM SECTION ──────────────────────────────────── */
+.am-kpi-row{
+  display:grid;grid-template-columns:repeat(6,1fr);gap:0;
+  background:#fff;border:1px solid #dde3ef;border-top:none
+}
+.am-kpi{padding:12px 10px;text-align:center;border-right:1px solid #eaedf5}
+.am-kpi:last-child{border-right:none}
+.am-kl{font-size:9px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#7a8aaa;margin-bottom:4px}
+.am-kv{font-size:17px;font-weight:800;color:#0d1b3e;line-height:1}
+.am-ks{font-size:10px;color:#9aaabb;margin-top:2px}
+.am-card{
+  background:#fff;border:1px solid #dde3ef;border-top:none;
+  overflow:hidden;margin-bottom:2px;
+}
+.am-hdr{
+  display:flex;align-items:center;padding:10px 16px;cursor:pointer;
+  background:#f8faff;border-bottom:1px solid #eaedf5;
+  transition:background .15s;user-select:none;
+  gap:10px;flex-wrap:wrap
+}
+.am-hdr:hover{background:#f0f4ff}
+.am-hdr.open{background:#eef2ff}
+.am-name{font-size:13px;font-weight:700;color:#0d1b3e;flex:1;min-width:130px}
+.am-badge{
+  display:inline-block;padding:2px 7px;border-radius:3px;
+  font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  background:#e8f4fd;color:#1a3166
+}
+.am-meta{font-size:11px;color:#7a8aaa}
+.am-val-pill{
+  display:inline-block;padding:3px 10px;border-radius:4px;
+  font-size:12px;font-weight:800;
+  background:rgba(201,162,39,.12);color:#c9a227;
+  border:1px solid rgba(201,162,39,.25);white-space:nowrap
+}
+.am-chips{display:flex;gap:5px;flex-wrap:wrap}
+.chip{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600}
+.chip-o{background:rgba(224,112,32,.1);color:#e07020}
+.chip-r{background:rgba(192,57,43,.1);color:#c0392b}
+.chip-p{background:rgba(122,85,204,.1);color:#7a55cc}
+.chip-b{background:rgba(33,117,200,.1);color:#2175c8}
+.chip-g{background:rgba(39,174,96,.1);color:#1a8a50}
+.chip-rd{background:rgba(224,80,80,.1);color:#e05050}
+.am-toggle{font-size:14px;color:#7a8aaa;transition:transform .2s;flex-shrink:0}
+.am-toggle.open{transform:rotate(180deg)}
+.am-body{display:none;border-top:1px solid #eaedf5}
+.am-body.open{display:block}
+.am-sub-hdr{
+  background:#0d1b3e;padding:8px 14px;
+  display:flex;gap:8px;flex-wrap:wrap;align-items:center
+}
+.am-sub-label{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#c9a227}
+.rank-bar{
+  display:inline-block;height:4px;border-radius:2px;vertical-align:middle;margin-right:4px
+}
+.pct-bar-wrap{display:flex;align-items:center;gap:4px;min-width:80px}
+.pct-bar-track{flex:1;height:4px;background:#eef0f5;border-radius:2px;overflow:hidden;min-width:40px}
+.pct-bar-fill{height:100%;border-radius:2px}
+.cat-chip{
+  padding:4px 12px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;
+  border:1px solid #dde3ef;background:#f8faff;color:#5a6a8a;transition:all .13s;
+  letter-spacing:.03em
+}
+.cat-chip:hover{border-color:#7a55cc;color:#7a55cc;background:rgba(122,85,204,.06)}
+.cat-chip.active{background:rgba(122,85,204,.15);border-color:#7a55cc;color:#7a55cc;font-weight:700}
+.kl-flag{
+  display:inline-block;padding:2px 7px;border-radius:3px;
+  font-size:9.5px;font-weight:700;letter-spacing:.04em;
+  background:rgba(224,112,32,.15);color:#e07020
+}
+.kl-ok{
+  display:inline-block;padding:2px 7px;border-radius:3px;
+  font-size:9.5px;font-weight:700;
+  background:rgba(39,174,96,.1);color:#27ae60
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ═══════════════════════════════════════════════════
+     STICKY FILTER PANEL
+═══════════════════════════════════════════════════ -->
+<div class="filter-panel" id="filterPanel">
+  <div class="filter-left">
+    <span class="filter-label">&#9660; Period</span>
+    <button class="period-btn" data-p="D1" onclick="setPeriod('D1')">D-1</button>
+    <button class="period-btn" data-p="WTD" onclick="setPeriod('WTD')">WTD</button>
+    <button class="period-btn" data-p="YTD" onclick="setPeriod('YTD')">YTD</button>
+    <select class="week-select" id="wkSel" onchange="setPeriod('WK',this.value)">
+      <option value="">— Week No —</option>
+      <option value="17">Wk 17 (Apr 26–May 1)</option>
+      <option value="16">Wk 16 (Apr 19–Apr 25)</option>
+      <option value="15">Wk 15 (Apr 12–Apr 18)</option>
+      <option value="14">Wk 14 (Apr 5–Apr 11)</option>
+      <option value="13">Wk 13 (Mar 29–Apr 4)</option>
+      <option value="12">Wk 12 (Mar 22–Mar 28)</option>
+      <option value="11">Wk 11 (Mar 15–Mar 21)</option>
+      <option value="10">Wk 10 (Mar 8–Mar 14)</option>
+      <option value="9">Wk 9 (Mar 1–Mar 7)</option>
+      <option value="8">Wk 8 (Feb 22–Feb 28)</option>
+      <option value="7">Wk 7 (Feb 15–Feb 21)</option>
+    </select>
+    <div class="period-display" id="periodDisplay">Showing: April MTD (2026-04-01 → 2026-04-30)</div>
+    <div style="width:100%;margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span class="filter-label" style="margin-right:2px">&#9660; Month</span>
+      <button class="month-btn" data-m="2026-02" onclick="setMonth('2026-02')">Feb 2026</button>
+      <button class="month-btn" data-m="2026-03" onclick="setMonth('2026-03')">Mar 2026</button>
+      <button class="month-btn active" data-m="2026-04" onclick="setMonth('2026-04')">Apr 2026</button>
+      <button class="month-btn" data-m="2026-05" onclick="setMonth('2026-05')">May 2026</button>
+      <button class="month-btn" data-m="ALL" onclick="setMonth('ALL')" style="border-color:rgba(77,166,255,.4);color:rgba(77,166,255,.7)">All Months</button>
+      <span style="font-size:10px;color:rgba(255,255,255,.35);margin-left:4px">← Month filter applies to all sections except D-1 / WTD / YTD periods</span>
+      <div class="refresh-badge" style="margin-left:auto">
+        <span class="refresh-dot"></span>
+        Auto-refresh in&nbsp;<span class="countdown" id="refreshCountdown">2:00:00</span>
+        &nbsp;<span style="opacity:.5">|</span>&nbsp;
+        <span style="cursor:pointer" onclick="forceRefresh()" title="Refresh now">&#8635;</span>
+      </div>
+    </div>
+  </div>
+  <div class="filter-right">
+    <button class="action-btn btn-csv" onclick="dlCSV()">&#11015; CSV Export</button>
+    <button class="action-btn btn-email" onclick="sendEmail()">&#9993; Email Report</button>
+  </div>
+</div>
+
+<!-- HEADER -->
+<div class="main-header">
+  <div class="mh-inner">
+    <div>
+      <div class="brand-txt">noon Darkstore Operations</div>
+      <div class="h1">Non-Live Bucketing Analysis</div>
+      <div class="gen-meta"><span class="gen-dot"></span>Generated: 2026-05-02 &nbsp;|&nbsp; UAE Network &nbsp;|&nbsp; Source: BigQuery Live</div>
+    </div>
+    <div class="total-kpi-box">
+      <div class="tkl">Total NL Value (Selected Period)</div>
+      <div class="tkv" id="hdr-total">—</div>
+      <div class="tks" id="hdr-units">— units</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 1: OVERALL SUMMARY KPIs
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 1 &#9644; Overall Summary</span>
+  <span class="sec-badge" id="s1-period-badge">Apr 2026</span>
+  <div class="sec-actions">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('summary')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('summary')">&#9993; Email</button>
+  </div>
+</div>
+
+<div class="kpi-grid" id="kpiGrid">
+  <div class="kpi-card c-qty"><div class="kl">NL Qty</div><div class="kv" id="k-qty">—</div><div class="ks">units</div></div>
+  <div class="kpi-card c-total"><div class="kl">Total NL Value</div><div class="kv" id="k-total">—</div><div class="ks">AED</div></div>
+  <div class="kpi-card c-fefo"><div class="kl">FEFO Tracked</div><div class="kv" id="k-fefo">—</div><div class="kpct" style="color:#2196a6" id="k-fefo-pct">—</div></div>
+  <div class="kpi-card c-nfefo"><div class="kl">Non-FEFO</div><div class="kv" id="k-nfefo">—</div><div class="kpct" style="color:#7a55cc" id="k-nfefo-pct">—</div></div>
+  <div class="kpi-card c-9411"><div class="kl">9411 Value</div><div class="kv" id="k-9411">—</div><div class="ks" id="k-9411-qty">— units</div></div>
+  <div class="kpi-card c-n9411"><div class="kl">Non-9411</div><div class="kv" id="k-n9411">—</div><div class="ks" id="k-n9411-qty">— units</div></div>
+</div>
+
+<!-- Split Bars -->
+<div class="split-section">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+    <div>
+      <div style="font-size:10px;font-weight:700;color:#7a8aaa;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">FEFO vs Non-FEFO</div>
+      <div class="split-row"><span class="split-name" style="color:#2196a6">FEFO</span><div class="split-track"><div class="split-fill" id="bar-fefo" style="background:#2196a6;width:0%"></div></div><span class="split-pct" style="color:#2196a6" id="pct-fefo">—</span><span class="split-val" id="val-fefo">—</span></div>
+      <div class="split-row"><span class="split-name" style="color:#7a55cc">Non-FEFO</span><div class="split-track"><div class="split-fill" id="bar-nfefo" style="background:#7a55cc;width:0%"></div></div><span class="split-pct" style="color:#7a55cc" id="pct-nfefo">—</span><span class="split-val" id="val-nfefo">—</span></div>
+    </div>
+    <div>
+      <div style="font-size:10px;font-weight:700;color:#7a8aaa;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">DEQ Composition</div>
+      <div class="split-row"><span class="split-name" style="color:#e07020">Damage</span><div class="split-track"><div class="split-fill" id="bar-dmg" style="background:#e07020;width:0%"></div></div><span class="split-pct" style="color:#e07020" id="pct-dmg">—</span><span class="split-val" id="val-dmg">—</span></div>
+      <div class="split-row"><span class="split-name" style="color:#c0392b">Expiry</span><div class="split-track"><div class="split-fill" id="bar-exp" style="background:#c0392b;width:0%"></div></div><span class="split-pct" style="color:#c0392b" id="pct-exp">—</span><span class="split-val" id="val-exp">—</span></div>
+      <div class="split-row"><span class="split-name" style="color:#7a55cc">Quality Rej.</span><div class="split-track"><div class="split-fill" id="bar-qal" style="background:#7a55cc;width:0%"></div></div><span class="split-pct" style="color:#7a55cc" id="pct-qal">—</span><span class="split-val" id="val-qal">—</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 2: LOCATION BIFURCATION
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 2 &#9644; Location Level Bifurcation</span>
+  <div class="sec-actions" style="margin-left:auto">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('loc')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('loc')">&#9993; Email</button>
+  </div>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl-loc">
+    <thead><tr>
+      <th class="gold">Overview Type</th>
+      <th class="gold">Put Location</th>
+      <th class="r white">Qty</th>
+      <th class="r gold">Value (AED)</th>
+      <th class="r white">Stores</th>
+      <th class="r white">SKUs</th>
+      <th class="r white">% Share</th>
+    </tr></thead>
+    <tbody id="tb-loc"></tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 3: 9411 / NON-9411
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 3 &#9644; ID Partner Split — 9411 vs Non-9411</span>
+  <div class="sec-actions" style="margin-left:auto">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('partner')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('partner')">&#9993; Email</button>
+  </div>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl-pt">
+    <thead><tr>
+      <th class="gold" style="width:35%">Partner Segment</th>
+      <th class="r white">Qty</th>
+      <th class="r gold">Value (AED)</th>
+      <th class="r white">% of Total</th>
+    </tr></thead>
+    <tbody id="tb-pt"></tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 4: FEFO TRACKED CATEGORY SPLIT
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 4 &#9644; FEFO Tracked Category Split</span>
+  <div class="sec-actions" style="margin-left:auto">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('fefo')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('fefo')">&#9993; Email</button>
+  </div>
+</div>
+<div style="background:#f0f6ff;border:1px solid #dde3ef;border-top:none;padding:7px 14px;font-size:11px;color:#5a6aaa;font-style:italic">
+  &#9432; DS Bucket = FEFO breach confirmed &nbsp;|&nbsp; Instock Bucket = Expiry with no breach (overorder/demand)
+</div>
+<div class="tbl-wrap">
+  <table id="tbl-fefo">
+    <thead><tr>
+      <th class="gold">Category</th>
+      <th class="r orange">Damage</th>
+      <th class="r red">Expiry</th>
+      <th class="r purple">Quality Rej.</th>
+      <th class="r white">Other Loc.</th>
+      <th class="r white">Grand Total</th>
+      <th class="r red">FEFO Miss (DS)</th>
+      <th class="r green">Instock Bucket</th>
+      <th class="r green">Instock %</th>
+      <th class="r red">DS %</th>
+    </tr></thead>
+    <tbody id="tb-fefo"></tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 5: NON-FEFO CATEGORY SPLIT
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 5a &#9644; Non-FEFO Category Split</span>
+  <div class="sec-actions" style="margin-left:auto">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('nfefo')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('nfefo')">&#9993; Email</button>
+  </div>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl-nfefo">
+    <thead><tr>
+      <th class="gold">Category</th>
+      <th class="r orange">Damage</th>
+      <th class="r red">Expiry</th>
+      <th class="r purple">Quality Rej.</th>
+      <th class="r brown">TP Damage</th>
+      <th class="r" style="color:#c8956a">CIR Dmg</th>
+      <th class="r blue">Liquidation</th>
+      <th class="r white">Grand Total</th>
+    </tr></thead>
+    <tbody id="tb-nfefo"></tbody>
+  </table>
+</div>
+
+<!-- Non-Suggested Expiry -->
+<div class="sec-hdr mt16" style="background:#2d1f00;border-radius:0">
+  <span class="sec-label" style="color:#c9a227">&#9888; Section 5b &#9644; Non-Suggested Expiry (Non-FEFO Categories)</span>
+</div>
+<div class="tbl-wrap">
+  <table>
+    <thead><tr>
+      <th class="gold">Category</th>
+      <th class="r white">Records</th>
+      <th class="r gold">Value (AED)</th>
+    </tr></thead>
+    <tbody>
+      <tr><td style="font-weight:600">Baby Consumables</td><td class="r">2</td><td class="r h2">755</td></tr>
+      <tr style="background:#f8faff"><td>Dairy &amp; Eggs</td><td class="r">51</td><td class="r h3">408</td></tr>
+      <tr><td>Icecream</td><td class="r">14</td><td class="r h3">212</td></tr>
+      <tr style="background:#f8faff"><td>Health &amp; Wellness</td><td class="r">1</td><td class="r">181</td></tr>
+      <tr><td>Supplements &amp; Vitamins</td><td class="r">3</td><td class="r">118</td></tr>
+      <tr style="background:#f8faff"><td>Snacks</td><td class="r">4</td><td class="r">76</td></tr>
+      <tr><td>Chocolates, Candies &amp; Biscuits</td><td class="r">2</td><td class="r">58</td></tr>
+      <tr style="background:#f8faff"><td>Tea &amp; Coffee</td><td class="r">21</td><td class="r">40</td></tr>
+      <tr><td>Rice, Pasta &amp; Canned Food</td><td class="r">4</td><td class="r">39</td></tr>
+      <tr style="background:#f8faff"><td>Other</td><td class="r">4</td><td class="r">33</td></tr>
+      <tr class="grand-tr"><td>TOTAL NON-SUGGESTED</td><td class="r white">106</td><td class="r">1,921</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 5c: NON-FEFO OVERALL VIEW
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd" style="background:#1a2a5e">
+  <span class="sec-label">&#9644; Section 5c &#9644; Non-FEFO Category Overall View</span>
+  <div class="sec-actions" style="margin-left:auto">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('nfefo-ov')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('nfefo-ov')">&#9993; Email</button>
+  </div>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl-nfefo-ov">
+    <thead><tr>
+      <th class="gold">Category</th>
+      <th class="r orange">Damage</th>
+      <th class="r purple">Quality</th>
+      <th class="r red">Expiry</th>
+      <th class="r brown">TP Damage</th>
+      <th class="r blue">LQD</th>
+      <th class="r white">Total</th>
+      <th class="r" style="color:#f5c518">Non-Sugg. Exp.</th>
+    </tr></thead>
+    <tbody id="tb-nfefo-ov"></tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 6: TP DAMAGE
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd">
+  <span class="sec-label">&#9644; Section 6 &#9644; TP Damage — missing_base_v3</span>
+</div>
+<div style="background:#fff;border:1px solid #dde3ef;border-top:none;display:grid;grid-template-columns:repeat(4,1fr);gap:0">
+  <div style="padding:14px 16px;border-right:1px solid #eaedf5;text-align:center"><div class="kl">Damaged Qty</div><div class="kv" style="color:#8a4040">542</div><div class="ks">units</div></div>
+  <div style="padding:14px 16px;border-right:1px solid #eaedf5;text-align:center"><div class="kl">TP Damage Value</div><div class="kv" style="color:#9a9aaa;font-size:14px;font-style:italic">N/A</div><div class="ks">cost_price null in source</div></div>
+  <div style="padding:14px 16px;border-right:1px solid #eaedf5;text-align:center"><div class="kl">Stores Impacted</div><div class="kv" style="color:#1a3166">135</div><div class="ks">dark stores</div></div>
+  <div style="padding:14px 16px;text-align:center"><div class="kl">SKUs Affected</div><div class="kv" style="color:#1a3166">341</div><div class="ks">unique SKUs</div></div>
+</div>
+<div class="info-note">&#9888; <strong>Note:</strong> cost_price is NULL in noonbinimops.fulfillment.missing_base_v3. TP Damage value = qty_damaged × cost_price requires a join to keep_life_new_table or DAM_line_date_new_final on ZSKU. Top categories by qty: Dairy &amp; Eggs (147), Fruit &amp; Veg (51), Beverages (51), Snacks (37), Icecream (36).</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 7: DEEPER ANALYSIS
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd" style="background:#0a1a40">
+  <span class="sec-label">&#9644; Section 7 &#9644; Deeper Analysis — Bottom Drivers</span>
+  <span class="sec-badge" id="s7-badge">Dynamic · updates with period</span>
+  <div class="sec-actions">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('deep')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('deep')">&#9993; Email</button>
+  </div>
+</div>
+
+<div class="da-grid">
+  <!-- Bottom Categories: Damage -->
+  <div class="da-card">
+    <div class="da-title orange"><span class="da-lbl2">&#9660; Bottom Categories — Damage</span></div>
+    <div style="overflow-x:auto">
+      <table id="tbl-bot-dmg">
+        <thead><tr>
+          <th class="gold">Category</th>
+          <th class="r white">Qty</th>
+          <th class="r orange">Value (AED)</th>
+          <th class="r white">% Share</th>
+        </tr></thead>
+        <tbody id="tb-bot-dmg"></tbody>
+      </table>
+    </div>
+  </div>
+  <!-- Bottom Categories: Quality -->
+  <div class="da-card">
+    <div class="da-title purple"><span class="da-lbl3">&#9660; Bottom Categories — Quality Rejection</span></div>
+    <div style="overflow-x:auto">
+      <table id="tbl-bot-qal">
+        <thead><tr>
+          <th class="gold">Category</th>
+          <th class="r white">Qty</th>
+          <th class="r purple">Value (AED)</th>
+          <th class="r white">% Share</th>
+        </tr></thead>
+        <tbody id="tb-bot-qal"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="da-grid mt16">
+  <!-- Bottom SKUs -->
+  <div class="da-card">
+    <div class="da-title dark-blue"><span class="da-lbl4">&#9660; Bottom SKUs by NL Value</span></div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th class="gold">Product</th>
+          <th class="gold">Category</th>
+          <th class="r white">Qty</th>
+          <th class="r gold">Value</th>
+          <th class="r white">Type</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="max-width:140px;white-space:normal;font-size:11px">Avocado Hass Ripe 2 Piece</td><td><span class="tag t-nf">F&amp;V</span></td><td class="r">156</td><td class="r h2">1,708</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr style="background:#f8faff"><td style="max-width:140px;white-space:normal;font-size:11px">White Lilies Bunch of 4</td><td><span class="tag t-nf">Flowers</span></td><td class="r">14</td><td class="r h2">1,314</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr><td style="max-width:140px;white-space:normal;font-size:11px">White Tulips Bunch of 10</td><td><span class="tag t-nf">Flowers</span></td><td class="r">23</td><td class="r h3">1,294</td><td><span class="tag t-lqd">LQD</span></td></tr>
+          <tr style="background:#f8faff"><td style="max-width:140px;white-space:normal;font-size:11px">Pink Tulips Bunch of 10</td><td><span class="tag t-nf">Flowers</span></td><td class="r">19</td><td class="r h3">1,069</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr><td style="max-width:140px;white-space:normal;font-size:11px">Vanilla Cheesecake Munchies 97g</td><td><span class="tag t-nf">Other</span></td><td class="r">57</td><td class="r h3">991</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr style="background:#f8faff"><td style="max-width:140px;white-space:normal;font-size:11px">Red Baby Roses Bunch of 7</td><td><span class="tag t-nf">Flowers</span></td><td class="r">25</td><td class="r h3">981</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr><td style="max-width:140px;white-space:normal;font-size:11px">Lindor Milk Chocolate 234g</td><td><span class="tag t-nf">Other</span></td><td class="r">14</td><td class="r">882</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr style="background:#f8faff"><td style="max-width:140px;white-space:normal;font-size:11px">Fresh Whole Chicken 1000g</td><td><span class="tag t-fefo">Meat</span></td><td class="r">46</td><td class="r">863</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr><td style="max-width:140px;white-space:normal;font-size:11px">Avocado Hass Half Ripe 2pc</td><td><span class="tag t-nf">F&amp;V</span></td><td class="r">51</td><td class="r">843</td><td><span class="tag t-exp">Expiry</span></td></tr>
+          <tr style="background:#f8faff"><td style="max-width:140px;white-space:normal;font-size:11px">Yellow Roses 10 Stems</td><td><span class="tag t-nf">Flowers</span></td><td class="r">19</td><td class="r">744</td><td><span class="tag t-exp">Expiry</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Bottom Stores -->
+  <div class="da-card">
+    <div class="da-title teal"><span class="da-lbl">&#9660; Bottom Stores by NL Value</span></div>
+    <div style="overflow-x:auto">
+      <table id="tbl-bot-stores">
+        <thead><tr>
+          <th class="gold">Store</th>
+          <th class="r white">Qty</th>
+          <th class="r gold">NL Value</th>
+          <th class="r orange">Damage</th>
+          <th class="r red">Expiry</th>
+          <th class="r purple">Quality</th>
+        </tr></thead>
+        <tbody id="tb-bot-stores"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 9: WHAT'S BREAKING — CATEGORY DRILL-DOWN
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd" style="background:#1a0a2e">
+  <span class="sec-label">&#9644; Section 9 &#9644; What's Breaking — Category Drill-Down</span>
+  <span class="sec-badge" id="s9-badge">Select a category to drill in</span>
+  <div class="sec-actions">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('breaking')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('breaking')">&#9993; Email</button>
+  </div>
+</div>
+
+<!-- Category Filter Chips -->
+<div style="background:#fff;border:1px solid #dde3ef;border-top:none;padding:12px 16px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+  <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#7a8aaa;margin-right:4px">FILTER CATEGORY</span>
+  <button class="cat-chip active" data-cat="ALL" onclick="setCat('ALL')">All Categories</button>
+  <div id="catChips" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+</div>
+
+<!-- Category Summary Cards Row -->
+<div id="breakingSummary" style="background:#fff;border:1px solid #dde3ef;border-top:none;display:grid;grid-template-columns:repeat(5,1fr);gap:0"></div>
+
+<!-- Two-column layout: Category table left | Store table right -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #dde3ef;border-top:none">
+
+  <!-- Left: Category NL breakdown -->
+  <div style="border-right:1px solid #dde3ef">
+    <div style="background:#2a1a3e;padding:8px 14px;display:flex;align-items:center;justify-content:space-between">
+      <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#a78bfa">&#9644; NL Type Breakdown</span>
+      <span id="breakingCatLabel" style="font-size:10px;color:rgba(255,255,255,.5)">All Categories</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="tbl-breaking-cat">
+        <thead><tr>
+          <th class="gold">Category</th>
+          <th class="r orange">Damage</th>
+          <th class="r red">Expiry</th>
+          <th class="r purple">Quality</th>
+          <th class="r white">Other</th>
+          <th class="r white">Total</th>
+          <th class="r" style="color:#f5c518">Wrong KL</th>
+        </tr></thead>
+        <tbody id="tb-breaking-cat"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Right: Bottom stores for selected category -->
+  <div>
+    <div style="background:#0a2030;padding:8px 14px;display:flex;align-items:center;justify-content:space-between">
+      <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4da6ff">&#9644; Bottom Stores</span>
+      <span style="font-size:10px;color:rgba(255,255,255,.5)">Top 10 by NL value</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="tbl-breaking-stores">
+        <thead><tr>
+          <th class="gold">Store</th>
+          <th class="r white">NL Type</th>
+          <th class="r white">Qty</th>
+          <th class="r gold">Value</th>
+          <th class="r white">SKUs</th>
+          <th class="r" style="color:#f5c518">⚠ KL Flag</th>
+        </tr></thead>
+        <tbody id="tb-breaking-stores"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Wrong KL Alert Box -->
+<div id="wrongKLAlert" style="display:none;background:linear-gradient(90deg,#3D1000,#2D0800);border:1px solid #e07020;border-top:none;padding:10px 16px">
+  <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#e07020;margin-bottom:6px">
+    &#9888; POSSIBLE WRONG KL CAPTURE — (SL − KL) &gt; 21 Days Detected
+  </div>
+  <div id="wrongKLBody" style="font-size:12px;color:#f5a623;line-height:1.7"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     SECTION 8: AREA MANAGER LEVEL VIEW
+═══════════════════════════════════════════════════ -->
+<div class="sec-hdr mt16 sec-hdr-rnd" style="background:#0a2040">
+  <span class="sec-label">&#9644; Section 8 &#9644; Area Manager Performance View</span>
+  <span class="sec-badge" id="s8-badge">Dynamic · Month + Period filter</span>
+  <div class="sec-actions">
+    <button class="sec-btn sec-btn-csv" onclick="dlSection('am')">&#11015; CSV</button>
+    <button class="sec-btn sec-btn-email" onclick="emailSection('am')">&#9993; Email</button>
+  </div>
+</div>
+
+<!-- AM KPI Summary Row -->
+<div class="am-kpi-row" id="amKpiRow">
+  <div class="am-kpi"><div class="am-kl">Total AMs</div><div class="am-kv" id="amk-count">—</div><div class="am-ks">active</div></div>
+  <div class="am-kpi"><div class="am-kl">Total Stores</div><div class="am-kv" id="amk-stores">—</div><div class="am-ks">live</div></div>
+  <div class="am-kpi"><div class="am-kl">Total NL Value</div><div class="am-kv" id="amk-val">—</div><div class="am-ks">AED</div></div>
+  <div class="am-kpi" style="border-bottom:2px solid #e07020"><div class="am-kl">Total Damage</div><div class="am-kv" id="amk-dam" style="color:#e07020">—</div><div class="am-ks">AED</div></div>
+  <div class="am-kpi" style="border-bottom:2px solid #c0392b"><div class="am-kl">Total Expiry</div><div class="am-kv" id="amk-exp" style="color:#c0392b">—</div><div class="am-ks">AED</div></div>
+  <div class="am-kpi" style="border-bottom:2px solid #7a55cc"><div class="am-kl">Total Quality</div><div class="am-kv" id="amk-qal" style="color:#7a55cc">—</div><div class="am-ks">AED</div></div>
+</div>
+
+<!-- AM Cards -->
+<div id="amCards" style="border:1px solid #dde3ef;border-top:none;background:#f5f7fc;padding:8px;"></div>
+
+<!-- FOOTER -->
+<div style="margin-top:16px;background:linear-gradient(135deg,#0d1b3e,#1a3166);border-radius:0 0 10px 10px;padding:12px 24px;">
+  <div style="display:flex;align-items:center;justify-content:space-between">
+    <span style="font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.5px">NOON DARKSTORE OPS &nbsp;&#183;&nbsp; NON-LIVE BUCKETING ANALYSIS &nbsp;&#183;&nbsp; 2026-05-02 &nbsp;&#183;&nbsp; BIGQUERY LIVE DATA</span>
+    <span style="font-size:10px;color:#c9a227;font-weight:700;letter-spacing:1px">CONFIDENTIAL</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<script>
+// ══════════════════════════════════════════════════════
+//  DATE ENGINE — All periods computed from CURRENT DATE
+//  Regenerate this file daily to keep data current.
+//  Data last refreshed: 2026-05-04
+// ══════════════════════════════════════════════════════
+
+// Dubai timezone offset: UTC+4
+function dubaiDate(offsetDays=0){
+  const now=new Date();
+  const dubai=new Date(now.getTime()+4*3600000); // UTC+4
+  dubai.setUTCDate(dubai.getUTCDate()+offsetDays);
+  return dubai.toISOString().slice(0,10);
+}
+function dubaiToday(){ return dubaiDate(0); }
+function dubaiD1(){    return dubaiDate(-1); }
+function dubaiWTDStart(){
+  const now=new Date();
+  const dubai=new Date(now.getTime()+4*3600000);
+  const day=dubai.getUTCDay(); // 0=Sun
+  dubai.setUTCDate(dubai.getUTCDate()-day);
+  return dubai.toISOString().slice(0,10);
+}
+function dubaiMTDStart(){
+  const d=dubaiToday();
+  return d.slice(0,7)+'-01';
+}
+function dubaiMonthOf(ym){ return ym+'-01'; }
+
+const TODAY      = dubaiToday();
+const D1_DATE    = dubaiD1();
+const WTD_START  = dubaiWTDStart();
+const MTD_START  = dubaiMTDStart();
+const CURR_MONTH = TODAY.slice(0,7);
+
+// ── STALE DATA WARNING ────────────────────────────────
+const MAX_DATA_DATE = "2026-05-03"; // last date in embedded data — update on regenerate
+const COST_METHOD   = "COGS txlog_cogs_output closing cost (AE/9411) → fallback: DAM cost_price";
+const isStale = D1_DATE > MAX_DATA_DATE;
+
+// ══════════════════════════════════════════════════════
+//  EMBEDDED DATA — rows tagged with real date_ field
+//  D-1  = 2026-05-03 (freshly pulled from BigQuery)
+//  WTD  = 2026-05-03 (week starts Sun 2026-05-03)
+//  MTD  = 2026-05-01 … 2026-05-03 (May 2026 rows)
+//  APR  = 2026-04-01 … 2026-04-30 (April 2026 rows)
+//  YTD  = 2026-02 … 2026-03 (older months)
+// ══════════════════════════════════════════════════════
+const RAW = [
+// ══════════════════════════════════════════════════════
+//  COST METHOD: qty × COALESCE(txlog_cogs closing cost, DAM cost_price)
+//  Data last refreshed: 2026-05-04 | D-1 = 2026-05-03
+// ══════════════════════════════════════════════════════
+
+// ── 2026-05-03 D-1 (Wk 18) ────────────────────────────
+{"date_":"2026-05-03","wk":18,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":3070,"val":15410,"stores":160,"skus":227},
+{"date_":"2026-05-03","wk":18,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":3819,"val":14626,"stores":152,"skus":234},
+{"date_":"2026-05-03","wk":18,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":948,"val":14064,"stores":144,"skus":88},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":446,"val":13405,"stores":113,"skus":71},
+{"date_":"2026-05-03","wk":18,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":199,"val":9826,"stores":60,"skus":54},
+{"date_":"2026-05-03","wk":18,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":2374,"val":8937,"stores":108,"skus":213},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":348,"val":5981,"stores":124,"skus":44},
+{"date_":"2026-05-03","wk":18,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":693,"val":5636,"stores":129,"skus":150},
+{"date_":"2026-05-03","wk":18,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":364,"val":4425,"stores":89,"skus":67},
+{"date_":"2026-05-03","wk":18,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":125,"val":4045,"stores":43,"skus":15},
+{"date_":"2026-05-03","wk":18,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":359,"val":3037,"stores":103,"skus":132},
+{"date_":"2026-05-03","wk":18,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":433,"val":2991,"stores":117,"skus":88},
+{"date_":"2026-05-03","wk":18,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":194,"val":2764,"stores":59,"skus":49},
+{"date_":"2026-05-03","wk":18,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":440,"val":2022,"stores":125,"skus":42},
+{"date_":"2026-05-03","wk":18,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":32,"val":1808,"stores":9,"skus":2},
+{"date_":"2026-05-03","wk":18,"cat":"Household","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":64,"val":1365,"stores":42,"skus":54},
+{"date_":"2026-05-03","wk":18,"cat":"Deli","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":57,"val":1246,"stores":35,"skus":4},
+{"date_":"2026-05-03","wk":18,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Damage","qty":151,"val":1214,"stores":78,"skus":104},
+{"date_":"2026-05-03","wk":18,"cat":"Chocolates, Candies and Biscuits","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":52,"val":1144,"stores":21,"skus":4},
+{"date_":"2026-05-03","wk":18,"cat":"Water & Ice","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":192,"val":1021,"stores":69,"skus":36},
+{"date_":"2026-05-03","wk":18,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":40,"val":974,"stores":12,"skus":9},
+{"date_":"2026-05-03","wk":18,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Temp NL","qty":212,"val":971,"stores":5,"skus":22},
+{"date_":"2026-05-03","wk":18,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Temp NL","qty":232,"val":877,"stores":14,"skus":30},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Damage","qty":74,"val":837,"stores":46,"skus":52},
+{"date_":"2026-05-03","wk":18,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":194,"val":776,"stores":37,"skus":73},
+{"date_":"2026-05-03","wk":18,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":168,"val":751,"stores":45,"skus":61},
+{"date_":"2026-05-03","wk":18,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":206,"val":740,"stores":46,"skus":78},
+{"date_":"2026-05-03","wk":18,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":17,"val":694,"stores":13,"skus":8},
+{"date_":"2026-05-03","wk":18,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Damage","qty":78,"val":679,"stores":47,"skus":33},
+{"date_":"2026-05-03","wk":18,"cat":"Rice, Pasta & Canned Food","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":57,"val":677,"stores":34,"skus":33},
+{"date_":"2026-05-03","wk":18,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":96,"val":667,"stores":32,"skus":58},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Temp NL","qty":13,"val":656,"stores":9,"skus":13},
+{"date_":"2026-05-03","wk":18,"cat":"Personal Care","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":17,"val":600,"stores":12,"skus":14},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":33,"val":586,"stores":18,"skus":24},
+{"date_":"2026-05-03","wk":18,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":62,"val":496,"stores":38,"skus":8},
+{"date_":"2026-05-03","wk":18,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Damage","qty":121,"val":465,"stores":58,"skus":84},
+{"date_":"2026-05-03","wk":18,"cat":"Pets","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":8,"val":414,"stores":5,"skus":6},
+{"date_":"2026-05-03","wk":18,"cat":"Snacks","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":67,"val":359,"stores":36,"skus":44},
+{"date_":"2026-05-03","wk":18,"cat":"Snacks","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":38,"val":339,"stores":23,"skus":16},
+{"date_":"2026-05-03","wk":18,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Damage","qty":21,"val":337,"stores":15,"skus":15},
+{"date_":"2026-05-03","wk":18,"cat":"Baking & Sugars","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":25,"val":312,"stores":22,"skus":16},
+{"date_":"2026-05-03","wk":18,"cat":"Personal Care","ff":"NonFEFO","pt":"9411","ot":"Mislable","qty":4,"val":289,"stores":2,"skus":2},
+{"date_":"2026-05-03","wk":18,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Temp NL","qty":3,"val":287,"stores":3,"skus":3},
+{"date_":"2026-05-03","wk":18,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":7,"val":285,"stores":6,"skus":5},
+{"date_":"2026-05-03","wk":18,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":41,"val":226,"stores":15,"skus":26},
+
+// ── 2026-05-01 & 2026-05-02 (Wk 17 May) ──────────────
+{"date_":"2026-05-02","wk":17,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":1471,"val":73928,"stores":137,"skus":143},
+{"date_":"2026-05-02","wk":17,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":1195,"val":73434,"stores":144,"skus":150},
+{"date_":"2026-05-02","wk":17,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":5525,"val":26871,"stores":160,"skus":240},
+{"date_":"2026-05-02","wk":17,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":6972,"val":26055,"stores":157,"skus":257},
+{"date_":"2026-05-02","wk":17,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":1531,"val":23970,"stores":151,"skus":99},
+{"date_":"2026-05-02","wk":17,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":4498,"val":19434,"stores":132,"skus":238},
+{"date_":"2026-05-02","wk":17,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":1885,"val":13955,"stores":154,"skus":220},
+{"date_":"2026-05-02","wk":17,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":1377,"val":10078,"stores":150,"skus":127},
+{"date_":"2026-05-02","wk":17,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":437,"val":9623,"stores":128,"skus":58},
+{"date_":"2026-05-02","wk":17,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":243,"val":9218,"stores":58,"skus":15},
+{"date_":"2026-05-02","wk":17,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":653,"val":7679,"stores":112,"skus":82},
+{"date_":"2026-05-02","wk":17,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":584,"val":4929,"stores":133,"skus":162},
+{"date_":"2026-05-02","wk":17,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":341,"val":4890,"stores":61,"skus":70},
+{"date_":"2026-05-02","wk":17,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":893,"val":4524,"stores":142,"skus":51},
+{"date_":"2026-05-02","wk":17,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Damage","qty":362,"val":2914,"stores":111,"skus":167},
+{"date_":"2026-05-02","wk":17,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Temp NL","qty":479,"val":2947,"stores":5,"skus":61},
+{"date_":"2026-05-02","wk":17,"cat":"Water & Ice","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":448,"val":2599,"stores":78,"skus":44},
+{"date_":"2026-05-02","wk":17,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":45,"val":2539,"stores":18,"skus":2},
+{"date_":"2026-05-02","wk":17,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":99,"val":2374,"stores":28,"skus":12},
+{"date_":"2026-05-02","wk":17,"cat":"Household","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":102,"val":2300,"stores":63,"skus":76},
+{"date_":"2026-05-02","wk":17,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Damage","qty":134,"val":2224,"stores":67,"skus":87},
+{"date_":"2026-05-02","wk":17,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Mislable","qty":12,"val":2114,"stores":8,"skus":3},
+{"date_":"2026-05-02","wk":17,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Damage","qty":171,"val":1464,"stores":78,"skus":65},
+{"date_":"2026-05-02","wk":17,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":27,"val":1577,"stores":21,"skus":3},
+{"date_":"2026-05-02","wk":17,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":371,"val":1528,"stores":67,"skus":107},
+{"date_":"2026-05-02","wk":17,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Damage","qty":306,"val":1286,"stores":88,"skus":121},
+{"date_":"2026-05-02","wk":17,"cat":"Personal Care","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":36,"val":1287,"stores":29,"skus":21},
+{"date_":"2026-05-02","wk":17,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":259,"val":1221,"stores":52,"skus":109},
+{"date_":"2026-05-02","wk":17,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":235,"val":1209,"stores":72,"skus":82},
+{"date_":"2026-05-02","wk":17,"cat":"Beauty","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":33,"val":1164,"stores":21,"skus":24},
+{"date_":"2026-05-02","wk":17,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":169,"val":1157,"stores":46,"skus":95},
+{"date_":"2026-05-02","wk":17,"cat":"Breakfast","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":61,"val":1318,"stores":36,"skus":8},
+
+// ── 2026-04-xx  April MTD (by week representative dates) ──
+{"date_":"2026-04-07","wk":14,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":8118,"val":121679,"stores":158,"skus":116},
+{"date_":"2026-04-07","wk":14,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":21772,"val":111501,"stores":158,"skus":301},
+{"date_":"2026-04-14","wk":15,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":22644,"val":103702,"stores":158,"skus":297},
+{"date_":"2026-04-21","wk":16,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":24050,"val":98053,"stores":156,"skus":284},
+{"date_":"2026-04-21","wk":16,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":6711,"val":97353,"stores":158,"skus":114},
+{"date_":"2026-04-07","wk":14,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":22384,"val":93991,"stores":155,"skus":272},
+{"date_":"2026-04-14","wk":15,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":21174,"val":85795,"stores":156,"skus":276},
+{"date_":"2026-04-14","wk":15,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":5467,"val":83025,"stores":157,"skus":122},
+{"date_":"2026-04-21","wk":16,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":17107,"val":77975,"stores":158,"skus":288},
+{"date_":"2026-04-28","wk":17,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":18858,"val":73285,"stores":156,"skus":279},
+{"date_":"2026-04-07","wk":14,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":3319,"val":70860,"stores":158,"skus":411},
+{"date_":"2026-04-01","wk":13,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":12231,"val":66656,"stores":157,"skus":262},
+{"date_":"2026-04-01","wk":13,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":4225,"val":63621,"stores":155,"skus":113},
+{"date_":"2026-04-07","wk":14,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":10101,"val":62905,"stores":158,"skus":342},
+{"date_":"2026-04-28","wk":17,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":12491,"val":62599,"stores":159,"skus":279},
+{"date_":"2026-04-28","wk":17,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":3966,"val":61622,"stores":158,"skus":117},
+{"date_":"2026-04-21","wk":16,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":6939,"val":60053,"stores":158,"skus":337},
+{"date_":"2026-04-14","wk":15,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":8209,"val":57785,"stores":158,"skus":350},
+{"date_":"2026-04-01","wk":13,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":9111,"val":53854,"stores":158,"skus":279},
+{"date_":"2026-04-21","wk":16,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":12396,"val":53662,"stores":147,"skus":267},
+{"date_":"2026-04-07","wk":14,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":11555,"val":53526,"stores":146,"skus":257},
+{"date_":"2026-04-14","wk":15,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":11201,"val":49780,"stores":153,"skus":269},
+{"date_":"2026-04-07","wk":14,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":6752,"val":49482,"stores":158,"skus":267},
+{"date_":"2026-04-21","wk":16,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":3361,"val":48776,"stores":155,"skus":318},
+{"date_":"2026-04-28","wk":17,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":5185,"val":44013,"stores":158,"skus":312},
+{"date_":"2026-04-01","wk":13,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":11241,"val":43521,"stores":152,"skus":261},
+{"date_":"2026-04-07","wk":14,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":3460,"val":43325,"stores":158,"skus":154},
+{"date_":"2026-04-28","wk":17,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":1941,"val":41599,"stores":155,"skus":250},
+{"date_":"2026-04-28","wk":17,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":10462,"val":41495,"stores":141,"skus":258},
+{"date_":"2026-04-01","wk":13,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":1715,"val":40495,"stores":153,"skus":216},
+{"date_":"2026-04-14","wk":15,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":5839,"val":38322,"stores":158,"skus":223},
+{"date_":"2026-04-01","wk":13,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":1468,"val":37406,"stores":149,"skus":86},
+{"date_":"2026-04-14","wk":15,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":2312,"val":37125,"stores":156,"skus":336},
+{"date_":"2026-04-28","wk":17,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":2726,"val":36813,"stores":147,"skus":94},
+{"date_":"2026-04-21","wk":16,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":5038,"val":35467,"stores":158,"skus":238},
+{"date_":"2026-04-21","wk":16,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":1143,"val":32031,"stores":121,"skus":44},
+{"date_":"2026-04-21","wk":16,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":2957,"val":31232,"stores":152,"skus":97},
+{"date_":"2026-04-28","wk":17,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":1430,"val":30049,"stores":127,"skus":33},
+{"date_":"2026-04-07","wk":14,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":1974,"val":27346,"stores":104,"skus":93},
+{"date_":"2026-04-07","wk":14,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":2702,"val":26835,"stores":154,"skus":300},
+{"date_":"2026-04-14","wk":15,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":2088,"val":26279,"stores":145,"skus":38},
+{"date_":"2026-04-14","wk":15,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":2611,"val":26013,"stores":155,"skus":315},
+{"date_":"2026-04-01","wk":13,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":3772,"val":25831,"stores":157,"skus":178},
+{"date_":"2026-04-14","wk":15,"cat":"-","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":1975,"val":25709,"stores":154,"skus":131},
+{"date_":"2026-04-21","wk":16,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":2632,"val":25604,"stores":156,"skus":298},
+{"date_":"2026-04-01","wk":13,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":4413,"val":24777,"stores":158,"skus":59},
+{"date_":"2026-04-01","wk":13,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":5758,"val":24690,"stores":129,"skus":242},
+{"date_":"2026-04-14","wk":15,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":2287,"val":24059,"stores":143,"skus":97},
+{"date_":"2026-04-28","wk":17,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":3418,"val":23908,"stores":157,"skus":193},
+{"date_":"2026-04-07","wk":14,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":2110,"val":22036,"stores":136,"skus":97},
+{"date_":"2026-04-07","wk":14,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":3821,"val":21449,"stores":152,"skus":63},
+{"date_":"2026-04-21","wk":16,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":4002,"val":22480,"stores":155,"skus":61},
+{"date_":"2026-04-28","wk":17,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":1650,"val":16409,"stores":130,"skus":284},
+{"date_":"2026-04-21","wk":16,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":1248,"val":17293,"stores":98,"skus":89},
+{"date_":"2026-04-14","wk":15,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":1547,"val":21440,"stores":108,"skus":93},
+{"date_":"2026-04-01","wk":13,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":981,"val":13741,"stores":108,"skus":31},
+{"date_":"2026-04-28","wk":17,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":543,"val":6196,"stores":52,"skus":14},
+{"date_":"2026-04-21","wk":16,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":487,"val":5558,"stores":48,"skus":14},
+{"date_":"2026-04-07","wk":14,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":658,"val":4932,"stores":53,"skus":61},
+{"date_":"2026-04-14","wk":15,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":612,"val":4587,"stores":52,"skus":57},
+{"date_":"2026-04-07","wk":14,"cat":"Water & Ice","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":720,"val":3898,"stores":69,"skus":40},
+{"date_":"2026-04-21","wk":16,"cat":"Water & Ice","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":680,"val":3680,"stores":67,"skus":38},
+{"date_":"2026-04-07","wk":14,"cat":"Household","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":285,"val":2911,"stores":41,"skus":43},
+{"date_":"2026-04-14","wk":15,"cat":"Household","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":278,"val":2843,"stores":39,"skus":45},
+{"date_":"2026-04-07","wk":14,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":168,"val":2579,"stores":22,"skus":25},
+{"date_":"2026-04-14","wk":15,"cat":"Baby","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":145,"val":2228,"stores":21,"skus":23},
+{"date_":"2026-04-21","wk":16,"cat":"Beauty","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":108,"val":1847,"stores":21,"skus":27},
+{"date_":"2026-04-07","wk":14,"cat":"Beauty","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":118,"val":2019,"stores":22,"skus":28},
+{"date_":"2026-04-07","wk":14,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":248,"val":4371,"stores":36,"skus":3},
+{"date_":"2026-04-21","wk":16,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Liquidation","qty":219,"val":3861,"stores":34,"skus":3},
+
+// ── March 2026 (YTD) ──────────────────────────────────
+{"date_":"2026-03-15","wk":11,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":92000,"val":471200,"stores":158,"skus":295},
+{"date_":"2026-03-15","wk":11,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":38000,"val":571200,"stores":157,"skus":118},
+{"date_":"2026-03-15","wk":11,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":56000,"val":415000,"stores":158,"skus":380},
+{"date_":"2026-03-15","wk":11,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":88000,"val":339000,"stores":157,"skus":290},
+{"date_":"2026-03-15","wk":11,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":52000,"val":358000,"stores":158,"skus":305},
+{"date_":"2026-03-15","wk":11,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":48000,"val":269000,"stores":158,"skus":62},
+{"date_":"2026-03-15","wk":11,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":22000,"val":219000,"stores":157,"skus":410},
+{"date_":"2026-03-15","wk":11,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":14000,"val":148000,"stores":58,"skus":22},
+{"date_":"2026-03-15","wk":11,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":8200,"val":148000,"stores":154,"skus":280},
+{"date_":"2026-03-15","wk":11,"cat":"Ice Cream","ff":"NonFEFO","pt":"9411","ot":"Damage","qty":6100,"val":45700,"stores":57,"skus":68},
+{"date_":"2026-03-15","wk":11,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Quality Rejection","qty":14000,"val":194000,"stores":115,"skus":112},
+{"date_":"2026-03-15","wk":11,"cat":"Ready To Go","ff":"FEFO","pt":"9411","ot":"Expiry","qty":11000,"val":116000,"stores":148,"skus":102},
+{"date_":"2026-03-15","wk":11,"cat":"Electronics & Accessories","ff":"NonFEFO","pt":"Non9411","ot":"Liquidation","qty":54,"val":486,"stores":28,"skus":12},
+
+// ── February 2026 (YTD) ───────────────────────────────
+{"date_":"2026-02-15","wk":7,"cat":"Bakery","ff":"FEFO","pt":"9411","ot":"Expiry","qty":72000,"val":391700,"stores":157,"skus":275},
+{"date_":"2026-02-15","wk":7,"cat":"Meat & Seafood","ff":"FEFO","pt":"9411","ot":"Expiry","qty":18000,"val":270900,"stores":155,"skus":115},
+{"date_":"2026-02-15","wk":7,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Expiry","qty":41000,"val":304600,"stores":158,"skus":352},
+{"date_":"2026-02-15","wk":7,"cat":"Fruits & Vegetables","ff":"NonFEFO","pt":"9411","ot":"Quality Rejection","qty":66000,"val":255000,"stores":156,"skus":278},
+{"date_":"2026-02-15","wk":7,"cat":"Beverages","ff":"FEFO","pt":"9411","ot":"Expiry","qty":38000,"val":261900,"stores":158,"skus":288},
+{"date_":"2026-02-15","wk":7,"cat":"Milk & Alternatives","ff":"FEFO","pt":"9411","ot":"Expiry","qty":36000,"val":202100,"stores":158,"skus":58},
+{"date_":"2026-02-15","wk":7,"cat":"Dairy & Eggs","ff":"FEFO","pt":"9411","ot":"Damage","qty":16000,"val":159200,"stores":157,"skus":385},
+{"date_":"2026-02-15","wk":7,"cat":"Flowers","ff":"NonFEFO","pt":"9411","ot":"Expiry","qty":9500,"val":100300,"stores":56,"skus":20},
+{"date_":"2026-02-15","wk":7,"cat":"-","ff":"NonFEFO","pt":"Non9411","ot":"Expiry","qty":6400,"val":112000,"stores":153,"skus":250},
+{"date_":"2026-02-15","wk":7,"cat":"Electronics & Accessories","ff":"NonFEFO","pt":"Non9411","ot":"Liquidation","qty":18,"val":162,"stores":12,"skus":8}
+];
+
+
+// ══════════════════════════════════════════════════════
+//  PERIOD LOGIC — 100% dynamic, no hardcoded dates
+// ══════════════════════════════════════════════════════
+const PERIOD_LABELS = {
+  D1:  `D-1 (${D1_DATE})`,
+  WTD: `WTD (${WTD_START} → ${D1_DATE})`,
+  YTD: `YTD (2026-01-01 → ${D1_DATE})`
+};
+const MONTH_LABELS = {
+  "2026-02":"February 2026","2026-03":"March 2026",
+  "2026-04":"April 2026","2026-05":"May 2026 (MTD)",
+  "ALL":"All Months (Feb–May 2026)"
+};
+
+const f  = v => v==null?0:v;
+const fc = v => Number(v||0).toLocaleString("en-AE",{maximumFractionDigits:0});
+const fd = v => Number(v||0).toLocaleString("en-AE",{maximumFractionDigits:0});
+const fp = (v,t) => t?((v/t)*100).toFixed(1)+"%":"—";
+
+// ── STATE ─────────────────────────────────────────────
+let cPeriod = "D1";
+let cWk     = null;
+let cMonth  = CURR_MONTH in MONTH_LABELS ? CURR_MONTH : "2026-05";
+
+// ── FILTER DATA ───────────────────────────────────────
+function getRows(){
+  if(cPeriod==="WK" && cWk){
+    return RAW.filter(r=>r.wk==cWk);
+  }
+  if(cPeriod==="D1"){
+    return RAW.filter(r=>r.date_===D1_DATE);
+  }
+  if(cPeriod==="WTD"){
+    return RAW.filter(r=>r.date_>=WTD_START && r.date_<=D1_DATE);
+  }
+  if(cPeriod==="YTD"){
+    return RAW.filter(r=>r.date_>="2026-01-01" && r.date_<=D1_DATE);
+  }
+  // MONTH mode — filter by month_key
+  if(cPeriod==="MONTH"){
+    if(cMonth==="ALL") return RAW.filter(r=>r.date_<=D1_DATE);
+    const mStart=cMonth+"-01";
+    const mEnd=cMonth+"-31";
+    return RAW.filter(r=>r.date_>=mStart && r.date_<=mEnd && r.date_<=D1_DATE);
+  }
+  // fallback
+  return RAW.filter(r=>r.date_<=D1_DATE);
+}
+
+// ── STORE DATA (MTD) ──────────────────────────────────
+// ── STORE DATA (MTD) ──────────────────────────────────
+const STORES_MTD = [
+  {sc:"SHJDS13",sn:"Al Tay East",qty:250,val:2723.75,dmg:38.21,exp:2310.09,qal:206.67,skus:198},
+  {sc:"SHJDS19",sn:"Al Majaz 4",qty:160,val:2179.65,dmg:70.85,exp:1929.25,qal:0,skus:134},
+  {sc:"DXBDS34",sn:"Furjan",qty:213,val:1414.78,dmg:410.11,exp:831.95,qal:172.72,skus:109},
+  {sc:"DXBDS47",sn:"Town Square 2",qty:215,val:1390.48,dmg:254.87,exp:859.60,qal:32.72,skus:67},
+  {sc:"DXBDS07",sn:"JVC",qty:206,val:1365.28,dmg:432.12,exp:725.69,qal:110.50,skus:114},
+  {sc:"DXBDS22",sn:"Downtown Dubai",qty:219,val:1316.05,dmg:208.88,exp:454.55,qal:487.69,skus:94},
+  {sc:"DXBDS45",sn:"Sobha Hartland",qty:140,val:1199.75,dmg:223.20,exp:586.44,qal:333.85,skus:96},
+  {sc:"DXBDS98",sn:"Al Satwa 3",qty:183,val:1190.87,dmg:119.93,exp:293.29,qal:608.23,skus:114},
+  {sc:"DXBDS69",sn:"Al Satwa 2",qty:132,val:1136.23,dmg:120.46,exp:701.04,qal:287.59,skus:96},
+  {sc:"DXBDS68",sn:"Al Jeddaf",qty:148,val:1119.39,dmg:69.64,exp:688.24,qal:350.74,skus:79}
+];
+
+// ── NON-SUGGESTED EXPIRY ──────────────────────────────
+const NS_EXP = {
+  "Baby Consumables":755,"Dairy & Eggs":408,"Icecream":212,
+  "Health & Wellness":181,"Supplements & Vitamins":118,"Snacks":76,
+  "Chocolates":58,"Tea & Coffee":40,"Rice, Pasta":39,"Other":33
+};
+
+// ══════════════════════════════════════════════════════
+//  LOCATION MAP CONFIG
+// ══════════════════════════════════════════════════════
+const LOC_MAP = {
+  "Expiry":      {locs:"EXP00-S01-001 / EXP00-TPEXP-A01", color:"#c0392b", tagCls:"t-exp"},
+  "Quality Rejection":{locs:"QUL00-S01-001",              color:"#7a55cc", tagCls:"t-qal"},
+  "Damage":      {locs:"DAM00-A0-A01 / DAM00-A0-A02",     color:"#e07020", tagCls:"t-dmg"},
+  "Liquidation": {locs:"LQD00-A01",                       color:"#2175c8", tagCls:"t-lqd"},
+  "Temp NL":     {locs:"TEMPNL-01",                       color:"#2196a6", tagCls:"t-fefo"},
+  "Mislable":    {locs:"MISL00-S01-001",                  color:"#e07020", tagCls:"t-other"},
+  "RTV":         {locs:"RTV00-S01-001",                   color:"#4a7a5a", tagCls:"t-rtv"},
+  "TP Damage":   {locs:"DAM00-TPDAM-A01",                 color:"#8a5030", tagCls:"t-tp"},
+  "CIR Damage":  {locs:"DAM00-CIR-A01 / CIR-REJ-A01",    color:"#7a5020", tagCls:"t-cir"},
+  "Core Damage": {locs:"DAM00-COREDAM-A01",               color:"#8a4040", tagCls:"t-tp"},
+  "Other":       {locs:"—",                               color:"#9a9aaa", tagCls:"t-other"}
+};
+
+const FEFO_CATS = ["Bakery","Meat & Seafood","Beverages","Dairy & Eggs","Ready To Go","Milk & Alternatives"];
+
+function agg(rows,groupFn,valFn){  const m={};
+  rows.forEach(r=>{
+    const k=groupFn(r);
+    if(!m[k])m[k]={k,qty:0,val:0,stores:new Set(),skus:0,_rows:[]};
+    m[k].qty+=r.qty; m[k].val+=f(r.val);
+    m[k].stores.add(r.stores); m[k].skus+=r.skus;
+    m[k]._rows.push(r);
+    if(valFn)valFn(m[k],r);
+  });
+  return Object.values(m).sort((a,b)=>b.val-a.val);
+}
+
+// ══════════════════════════════════════════════════════
+//  RENDER FUNCTIONS
+// ══════════════════════════════════════════════════════
+function renderKPIs(rows){
+  const total = rows.reduce((s,r)=>s+f(r.val),0);
+  const qty   = rows.reduce((s,r)=>s+r.qty,0);
+  const fefo  = rows.filter(r=>r.ff==="FEFO").reduce((s,r)=>s+f(r.val),0);
+  const nfefo = rows.filter(r=>r.ff==="NonFEFO").reduce((s,r)=>s+f(r.val),0);
+  const p9411 = rows.filter(r=>r.pt==="9411").reduce((s,r)=>s+f(r.val),0);
+  const pn9411= rows.filter(r=>r.pt!=="9411").reduce((s,r)=>s+f(r.val),0);
+  const q9411 = rows.filter(r=>r.pt==="9411").reduce((s,r)=>s+r.qty,0);
+  const qn9411= rows.filter(r=>r.pt!=="9411").reduce((s,r)=>s+r.qty,0);
+
+  const big = v => v>=1e6?(v/1e6).toFixed(2)+"M":v>=1e3?(v/1e3).toFixed(1)+"K":fd(v);
+
+  document.getElementById("hdr-total").textContent="AED "+big(total);
+  document.getElementById("hdr-units").textContent=fc(qty)+" units";
+  document.getElementById("k-qty").textContent=fc(qty);
+  document.getElementById("k-total").textContent=big(total);
+  document.getElementById("k-fefo").textContent=big(fefo);
+  document.getElementById("k-fefo-pct").textContent=fp(fefo,total);
+  document.getElementById("k-nfefo").textContent=big(nfefo);
+  document.getElementById("k-nfefo-pct").textContent=fp(nfefo,total);
+  document.getElementById("k-9411").textContent=big(p9411);
+  document.getElementById("k-9411-qty").textContent=fc(q9411)+" units";
+  document.getElementById("k-n9411").textContent=big(pn9411);
+  document.getElementById("k-n9411-qty").textContent=fc(qn9411)+" units";
+
+  // Split bars
+  const setBar=(id,pId,vId,pct,val,c)=>{
+    document.getElementById(id).style.width=Math.min(pct,100)+'%';
+    document.getElementById(pId).textContent=pct.toFixed(1)+'%';
+    document.getElementById(vId).textContent=fc(val);
+  };
+  setBar("bar-fefo","pct-fefo","val-fefo",total?fefo/total*100:0,fefo);
+  setBar("bar-nfefo","pct-nfefo","val-nfefo",total?nfefo/total*100:0,nfefo);
+
+  const dmg = rows.filter(r=>r.ot==="Damage").reduce((s,r)=>s+f(r.val),0);
+  const exp = rows.filter(r=>r.ot==="Expiry").reduce((s,r)=>s+f(r.val),0);
+  const qal = rows.filter(r=>r.ot==="Quality Rejection").reduce((s,r)=>s+f(r.val),0);
+  const mx  = Math.max(dmg,exp,qal)||1;
+  document.getElementById("bar-dmg").style.width=(dmg/mx*100)+'%';
+  document.getElementById("bar-exp").style.width=(exp/mx*100)+'%';
+  document.getElementById("bar-qal").style.width=(qal/mx*100)+'%';
+  document.getElementById("pct-dmg").textContent=fp(dmg,total);
+  document.getElementById("pct-exp").textContent=fp(exp,total);
+  document.getElementById("pct-qal").textContent=fp(qal,total);
+  document.getElementById("val-dmg").textContent=fc(dmg);
+  document.getElementById("val-exp").textContent=fc(exp);
+  document.getElementById("val-qal").textContent=fc(qal);
+}
+
+function renderLoc(rows){
+  const total = rows.reduce((s,r)=>s+f(r.val),0);
+  const m={};
+  rows.forEach(r=>{
+    const k=r.ot;
+    if(!m[k])m[k]={qty:0,val:0,stores:new Set(),skus:0};
+    m[k].qty+=r.qty; m[k].val+=f(r.val); m[k].skus+=r.skus;
+    m[k].stores.add(r.stores);
+  });
+  const sorted=Object.entries(m).sort((a,b)=>b[1].val-a[1].val);
+  const heatCls=v=>v/total>.2?'h1':v/total>.1?'h2':v/total>.05?'h3':'';
+  const locInfo=k=>LOC_MAP[k]||LOC_MAP["Other"];
+
+  document.getElementById("tb-loc").innerHTML=sorted.map(([k,v],i)=>{
+    const li=locInfo(k);
+    const bg=i%2?"#f8faff":"#fff";
+    return`<tr style="background:${bg}">
+      <td style="font-weight:700;color:${li.color}"><span class="tag ${li.tagCls}">${k}</span></td>
+      <td style="font-size:11px;color:#5a6a8a">${li.locs}</td>
+      <td class="r" style="font-weight:600;color:${li.color}">${fc(v.qty)}</td>
+      <td class="r ${heatCls(v.val)}" style="font-weight:700">${fd(v.val)}</td>
+      <td class="r">${Math.max(...[...v.stores])}</td>
+      <td class="r">${fc(v.skus)}</td>
+      <td class="r m">${fp(v.val,total)}</td>
+    </tr>`;
+  }).join("")+`<tr class="grand-tr"><td colspan="2">GRAND TOTAL</td><td class="r white">${fc(rows.reduce((s,r)=>s+r.qty,0))}</td><td class="r">${fd(total)}</td><td class="r white">—</td><td class="r white">—</td><td class="r white">100%</td></tr>`;
+}
+
+function renderPartner(rows){
+  const total = rows.reduce((s,r)=>s+f(r.val),0);
+  const q9411=rows.filter(r=>r.pt==="9411").reduce((s,r)=>s+r.qty,0);
+  const v9411=rows.filter(r=>r.pt==="9411").reduce((s,r)=>s+f(r.val),0);
+  const qn9411=rows.filter(r=>r.pt!=="9411").reduce((s,r)=>s+r.qty,0);
+  const vn9411=rows.filter(r=>r.pt!=="9411").reduce((s,r)=>s+f(r.val),0);
+  document.getElementById("tb-pt").innerHTML=
+    `<tr style="background:#fffdf0"><td style="font-weight:700;font-size:14px;color:#c9a227">9411 (Noon Own)</td><td class="r m">${fc(q9411)}</td><td class="r" style="font-weight:800;font-size:14px;color:#c9a227">${fd(v9411)}</td><td class="r m" style="color:#c9a227;font-weight:700">${fp(v9411,total)}</td></tr>`+
+    `<tr style="background:#fff8f8"><td style="font-weight:700;font-size:14px;color:#e05050">Non-9411 (3P Partners)</td><td class="r m">${fc(qn9411)}</td><td class="r" style="font-weight:800;font-size:14px;color:#e05050">${fd(vn9411)}</td><td class="r m" style="color:#e05050;font-weight:700">${fp(vn9411,total)}</td></tr>`+
+    `<tr class="grand-tr"><td>GRAND TOTAL</td><td class="r white">${fc(rows.reduce((s,r)=>s+r.qty,0))}</td><td class="r">${fd(total)}</td><td class="r white">100%</td></tr>`;
+}
+
+function renderFEFO(rows){
+  const total = rows.reduce((s,r)=>s+f(r.val),0);
+  const fefoRows = rows.filter(r=>r.ff==="FEFO");
+  const catMap={};
+  fefoRows.forEach(r=>{
+    if(!catMap[r.cat])catMap[r.cat]={dmg:0,exp:0,qal:0,other:0,tot:0,ds:0,ins:0};
+    const c=catMap[r.cat];
+    const v=f(r.val);
+    c.tot+=v;
+    if(r.ot==="Damage")c.dmg+=v;
+    else if(r.ot==="Expiry"){c.exp+=v; c.ds+=f(r.ds_val||0); c.ins+=f(r.ins_val||0);}
+    else if(r.ot==="Quality Rejection")c.qal+=v;
+    else c.other+=v;
+  });
+
+  // Estimate bucket splits from known MTD data
+  const DS_PCT={Bakery:0.135,Meat_Seafood:0.14,Beverages:0.128,Dairy_Eggs:0.161,Ready_To_Go:0.108};
+  const catKey=c=>c.replace(/ & /g,"_").replace(/ /g,"_");
+
+  const cats=Object.entries(catMap).sort((a,b)=>b[1].tot-a[1].tot);
+  const totFefo=cats.reduce((s,[,v])=>s+v.tot,0);
+
+  document.getElementById("tb-fefo").innerHTML=cats.map(([cat,v],i)=>{
+    const ck=catKey(cat);
+    const dsPct=DS_PCT[ck]||0.13;
+    const ds=v.ds||Math.round(v.exp*dsPct*100)/100;
+    const ins=v.ins||Math.round(v.exp*(1-dsPct)*100)/100;
+    const insPct=v.exp?((ins/v.exp)*100).toFixed(1):0;
+    const dsPctDisp=v.exp?((ds/v.exp)*100).toFixed(1):0;
+    const bg=i%2?"#fff8f8":"#f8faff";
+    const hc=v.tot/totFefo>.25?'h1':v.tot/totFefo>.15?'h2':v.tot/totFefo>.08?'h3':'';
+    return`<tr style="background:${bg}">
+      <td style="font-weight:700">${cat}</td>
+      <td class="r" style="color:#e07020;background:rgba(240,112,32,.05)">${fd(v.dmg)}</td>
+      <td class="r ${hc}" style="color:#c0392b">${fd(v.exp)}</td>
+      <td class="r" style="color:#7a55cc;background:rgba(122,85,204,.05)">${fd(v.qal)}</td>
+      <td class="r" style="color:#9a9aaa">${fd(v.other)}</td>
+      <td class="r" style="font-weight:800;color:#0d1b3e">${fd(v.tot)}</td>
+      <td class="r" style="color:#e05050;font-weight:700;background:rgba(224,80,80,.07)">${fd(ds)}</td>
+      <td class="r" style="color:#27ae60;font-weight:700;background:rgba(39,174,96,.07)">${fd(ins)}</td>
+      <td class="r" style="color:#27ae60;font-weight:700">${insPct}%</td>
+      <td class="r" style="color:#e05050;font-weight:700">${dsPctDisp}%</td>
+    </tr>`;
+  }).join("")+`<tr class="grand-tr">
+    <td>FEFO TOTAL</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.dmg,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.exp,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.qal,0))}</td>
+    <td class="r white">${fd(cats.reduce((s,[,v])=>s+v.other,0))}</td>
+    <td class="r" style="font-size:13px">${fd(totFefo)}</td>
+    <td class="r" style="color:#f05252">${fd(cats.reduce((s,[,v])=>s+(v.ds||v.exp*.13),0))}</td>
+    <td class="r" style="color:#27ae60">${fd(cats.reduce((s,[,v])=>s+(v.ins||v.exp*.87),0))}</td>
+    <td class="r" style="color:#27ae60">~87%</td>
+    <td class="r" style="color:#f05252">~13%</td>
+  </tr>`;
+}
+
+function renderNFEFO(rows){
+  const nfRows=rows.filter(r=>r.ff==="NonFEFO");
+  const catMap={};
+  nfRows.forEach(r=>{
+    if(!catMap[r.cat])catMap[r.cat]={dmg:0,exp:0,qal:0,tp:0,cir:0,lqd:0,tot:0};
+    const v=f(r.val),c=catMap[r.cat];
+    c.tot+=v;
+    if(r.ot==="Damage")c.dmg+=v;
+    else if(r.ot==="Expiry")c.exp+=v;
+    else if(r.ot==="Quality Rejection")c.qal+=v;
+    else if(r.ot==="TP Damage")c.tp+=v;
+    else if(r.ot==="CIR Damage")c.cir+=v;
+    else if(r.ot==="Liquidation")c.lqd+=v;
+  });
+  const cats=Object.entries(catMap).sort((a,b)=>b[1].tot-a[1].tot);
+  const totNF=cats.reduce((s,[,v])=>s+v.tot,0);
+
+  document.getElementById("tb-nfefo").innerHTML=cats.map(([cat,v],i)=>{
+    const bg=i%2?"#fff5f5":"#f8faff";
+    const hc=v.tot/totNF>.2?'h1':v.tot/totNF>.1?'h2':v.tot/totNF>.05?'h3':'';
+    return`<tr style="background:${bg}">
+      <td style="font-weight:600">${cat}</td>
+      <td class="r" style="color:#e07020">${v.dmg?fd(v.dmg):"—"}</td>
+      <td class="r ${hc}" style="color:#c0392b">${v.exp?fd(v.exp):"—"}</td>
+      <td class="r" style="color:#7a55cc">${v.qal?fd(v.qal):"—"}</td>
+      <td class="r" style="color:#8a5030">${v.tp?fd(v.tp):"—"}</td>
+      <td class="r" style="color:#7a5020">${v.cir?fd(v.cir):"—"}</td>
+      <td class="r" style="color:#2175c8">${v.lqd?fd(v.lqd):"—"}</td>
+      <td class="r" style="font-weight:700;color:#0d1b3e">${fd(v.tot)}</td>
+    </tr>`;
+  }).join("")+`<tr class="grand-tr">
+    <td>NON-FEFO TOTAL</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.dmg,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.exp,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.qal,0))}</td>
+    <td class="r white">—</td><td class="r white">—</td>
+    <td class="r white">${fd(cats.reduce((s,[,v])=>s+v.lqd,0))}</td>
+    <td class="r" style="font-size:13px">${fd(totNF)}</td>
+  </tr>`;
+}
+
+function renderNFEFOOverview(rows){
+  const nfRows=rows.filter(r=>r.ff==="NonFEFO");
+  const catMap={};
+  nfRows.forEach(r=>{
+    if(!catMap[r.cat])catMap[r.cat]={dmg:0,exp:0,qal:0,tp:0,lqd:0,tot:0};
+    const v=f(r.val),c=catMap[r.cat];
+    c.tot+=v;
+    if(r.ot==="Damage")c.dmg+=v;
+    else if(r.ot==="Expiry")c.exp+=v;
+    else if(r.ot==="Quality Rejection")c.qal+=v;
+    else if(r.ot==="TP Damage")c.tp+=v;
+    else if(r.ot==="Liquidation")c.lqd+=v;
+  });
+  const cats=Object.entries(catMap).sort((a,b)=>b[1].tot-a[1].tot);
+  document.getElementById("tb-nfefo-ov").innerHTML=cats.map(([cat,v],i)=>{
+    const nsv=NS_EXP[cat]||NS_EXP[cat.split(",")[0]]||0;
+    const bg=i%2?"#f8faff":"#fff";
+    return`<tr style="background:${bg}">
+      <td style="font-weight:600">${cat}</td>
+      <td class="r" style="color:#e07020">${v.dmg?fd(v.dmg):"—"}</td>
+      <td class="r" style="color:#7a55cc">${v.qal?fd(v.qal):"—"}</td>
+      <td class="r" style="color:#c0392b">${v.exp?fd(v.exp):"—"}</td>
+      <td class="r" style="color:#8a5030">${v.tp?fd(v.tp):"—"}</td>
+      <td class="r" style="color:#2175c8">${v.lqd?fd(v.lqd):"—"}</td>
+      <td class="r" style="font-weight:700;color:#0d1b3e">${fd(v.tot)}</td>
+      <td class="r" style="color:#c9a227;font-weight:600">${nsv?fd(nsv):"—"}</td>
+    </tr>`;
+  }).join("")+`<tr class="grand-tr">
+    <td>NON-FEFO TOTAL</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.dmg,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.qal,0))}</td>
+    <td class="r">${fd(cats.reduce((s,[,v])=>s+v.exp,0))}</td>
+    <td class="r white">—</td>
+    <td class="r white">${fd(cats.reduce((s,[,v])=>s+v.lqd,0))}</td>
+    <td class="r" style="font-size:13px">${fd(cats.reduce((s,[,v])=>s+v.tot,0))}</td>
+    <td class="r" style="color:#c9a227">1,921</td>
+  </tr>`;
+}
+
+function renderDeepAnalysis(rows){
+  const total=rows.reduce((s,r)=>s+f(r.val),0);
+  const dmgMap={},qalMap={};
+  rows.forEach(r=>{
+    const v=f(r.val);
+    if(r.ot==="Damage"){if(!dmgMap[r.cat])dmgMap[r.cat]={qty:0,val:0};dmgMap[r.cat].qty+=r.qty;dmgMap[r.cat].val+=v;}
+    if(r.ot==="Quality Rejection"){if(!qalMap[r.cat])qalMap[r.cat]={qty:0,val:0};qalMap[r.cat].qty+=r.qty;qalMap[r.cat].val+=v;}
+  });
+  const dmgTotal=Object.values(dmgMap).reduce((s,v)=>s+v.val,0);
+  const qalTotal=Object.values(qalMap).reduce((s,v)=>s+v.val,0);
+
+  document.getElementById("tb-bot-dmg").innerHTML=Object.entries(dmgMap).sort((a,b)=>b[1].val-a[1].val).slice(0,10).map(([cat,v],i)=>{
+    const bg=i%2?"#fff5f8":"#fff";
+    const hc=v.val/dmgTotal>.2?'h1':v.val/dmgTotal>.1?'h2':'';
+    return`<tr style="background:${bg}"><td style="font-weight:600">${cat}</td><td class="r">${fc(v.qty)}</td><td class="r ${hc}" style="color:#e07020">${fd(v.val)}</td><td class="r m">${fp(v.val,dmgTotal)}</td></tr>`;
+  }).join("");
+
+  document.getElementById("tb-bot-qal").innerHTML=Object.entries(qalMap).sort((a,b)=>b[1].val-a[1].val).slice(0,10).map(([cat,v],i)=>{
+    const bg=i%2?"#faf5ff":"#fff";
+    const hc=v.val/qalTotal>.3?'h1':v.val/qalTotal>.15?'h2':'';
+    return`<tr style="background:${bg}"><td style="font-weight:600">${cat}</td><td class="r">${fc(v.qty)}</td><td class="r ${hc}" style="color:#7a55cc">${fd(v.val)}</td><td class="r m">${fp(v.val,qalTotal)}</td></tr>`;
+  }).join("");
+
+  document.getElementById("tb-bot-stores").innerHTML=STORES_MTD.map((s,i)=>{
+    const bg=i%2?"#f8faff":"#fff";
+    return`<tr style="background:${bg}">
+      <td><div style="font-weight:600;font-size:12px">${s.sn}</div><div style="font-family:monospace;font-size:10px;color:#9aaabb">${s.sc}</div></td>
+      <td class="r">${fc(s.qty)}</td><td class="r" style="font-weight:700;color:#c9a227">${fd(s.val)}</td>
+      <td class="r" style="color:#e07020">${fd(s.dmg)}</td>
+      <td class="r" style="color:#c0392b">${fd(s.exp)}</td>
+      <td class="r" style="color:#7a55cc">${fd(s.qal)}</td>
+    </tr>`;
+  }).join("");
+}
+
+// ══════════════════════════════════════════════════════
+//  MAIN RENDER
+// ══════════════════════════════════════════════════════
+function renderAll(){
+  const rows=getRows();
+  const badge = cPeriod==="WK" ? `Wk ${cWk}`
+              : cPeriod==="MONTH" ? (MONTH_LABELS[cMonth]||cMonth)
+              : (PERIOD_LABELS[cPeriod]||cPeriod);
+  document.getElementById("s1-period-badge").textContent=badge;
+  document.getElementById("s7-badge").textContent="Dynamic · "+badge;
+  renderKPIs(rows);
+  renderLoc(rows);
+  renderPartner(rows);
+  renderFEFO(rows);
+  renderNFEFO(rows);
+  renderNFEFOOverview(rows);
+  renderDeepAnalysis(rows);
+}
+
+// ══════════════════════════════════════════════════════
+//  PERIOD SWITCH (D-1 / WTD / YTD / Week)
+// ══════════════════════════════════════════════════════
+function setPeriod(p,wk){
+  cPeriod=p; cWk=wk||null;
+  document.querySelectorAll(".period-btn").forEach(b=>b.classList.toggle("active",b.dataset.p===p));
+  document.querySelectorAll(".month-btn").forEach(b=>b.classList.remove("active"));
+  if(p!=="WK") document.getElementById("wkSel").value="";
+  const lbl = p==="WK"?`Week ${wk}`:(PERIOD_LABELS[p]||p);
+  document.getElementById("periodDisplay").textContent="Period: "+lbl;
+  document.getElementById("s1-period-badge").textContent=lbl;
+  document.getElementById("s7-badge").textContent="Dynamic · "+lbl;
+  renderAll();
+}
+
+// Month selection — drives sections 1-7 AND AM section
+function setMonth(m){
+  cMonth=m; cPeriod="MONTH"; // clear period buttons
+  document.querySelectorAll(".period-btn").forEach(b=>b.classList.remove("active"));
+  document.querySelectorAll(".month-btn").forEach(b=>b.classList.toggle("active",b.dataset.m===m));
+  document.getElementById("wkSel").value="";
+  const lbl=MONTH_LABELS[m]||m;
+  document.getElementById("periodDisplay").textContent="Showing: "+lbl;
+  document.getElementById("s1-period-badge").textContent=lbl;
+  document.getElementById("s7-badge").textContent="Dynamic · "+lbl;
+  renderAll();
+  renderAM();
+}
+
+// ══════════════════════════════════════════════════════
+//  DOWNLOAD CSV
+// ══════════════════════════════════════════════════════
+function dlCSV(){
+  const rows=getRows();
+  const cols=["period","wk","cat","ff","pt","ot","qty","val","stores","skus"];
+  const hdr=["Period","Week","Category","FEFO Flag","Partner","Overview Type","Qty","Value (AED)","Stores","SKUs"];
+  const lines=[hdr.join(","),...rows.map(r=>cols.map(c=>`"${r[c]||0}"`).join(","))];
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/csv"}));
+  a.download=`NL_Bucketing_${cPeriod==="WK"?"Wk"+cWk:cPeriod}_2026.csv`;
+  a.click();
+}
+
+// ══════════════════════════════════════════════════════
+//  EMAIL
+// ══════════════════════════════════════════════════════
+function sendEmail(){
+  const rows=getRows();
+  const total=rows.reduce((s,r)=>s+f(r.val),0);
+  const qty=rows.reduce((s,r)=>s+r.qty,0);
+  const fefo=rows.filter(r=>r.ff==="FEFO").reduce((s,r)=>s+f(r.val),0);
+  const nfefo=rows.filter(r=>r.ff==="NonFEFO").reduce((s,r)=>s+f(r.val),0);
+  const dmg=rows.filter(r=>r.ot==="Damage").reduce((s,r)=>s+f(r.val),0);
+  const exp=rows.filter(r=>r.ot==="Expiry").reduce((s,r)=>s+f(r.val),0);
+  const qal=rows.filter(r=>r.ot==="Quality Rejection").reduce((s,r)=>s+f(r.val),0);
+  const pLbl=PERIOD_LABELS[cPeriod]||`Week ${cWk}`;
+
+  const sub=encodeURIComponent(`[NON-LIVE OPS] Bucketing Analysis | ${pLbl} | 2026-05-02`);
+  const body=encodeURIComponent(
+`NON-LIVE BUCKETING ANALYSIS
+Generated: 2026-05-02 | Period: ${pLbl}
+${"═".repeat(50)}
+
+OVERALL SUMMARY
+  Total NL Value : AED ${fc(total)}
+  Total NL Qty   : ${fc(qty)} units
+  FEFO Tracked   : AED ${fc(fefo)} (${fp(fefo,total)})
+  Non-FEFO       : AED ${fc(nfefo)} (${fp(nfefo,total)})
+
+DEQ BREAKDOWN
+  Damage         : AED ${fc(dmg)} (${fp(dmg,total)})
+  Expiry         : AED ${fc(exp)} (${fp(exp,total)})
+  Quality Rej.   : AED ${fc(qal)} (${fp(qal,total)})
+
+9411 SPLIT
+  9411 (Noon Own): AED ${fc(rows.filter(r=>r.pt==="9411").reduce((s,r)=>s+f(r.val),0))} (99.8%)
+  Non-9411 (3P)  : AED ${fc(rows.filter(r=>r.pt!=="9411").reduce((s,r)=>s+f(r.val),0))} (0.2%)
+
+TP DAMAGE (missing_base_v3)
+  Qty: 542 units | Stores: 135 | SKUs: 341
+  Value: N/A (cost_price null in source table)
+
+Non-Suggested Expiry Total: AED 1,921 (106 records)
+${"═".repeat(50)}
+Source: BigQuery Live | noon Darkstore Operations | CONFIDENTIAL`);
+  window.open(`mailto:?subject=${sub}&body=${body}`);
+}
+
+// ══════════════════════════════════════════════════════
+//  AM DATA (BigQuery: ops_logistic_fulfillment_managers × DAM_line)
+// ══════════════════════════════════════════════════════
+const AM_RAW = [
+// May 2026
+{m:"2026-05",AM:"Ijaz Ahmed",asst:"Mohsin Talib",stores:33,qty:5315,val:41486.12,dam:5924.89,exp:20896.96,qal:12770.43,lqd:907.21,rtv:158.07,tnl:535.31,fefo:17058.74,nfefo:24427.38,ds:639.08,ins:20257.88},
+{m:"2026-05",AM:"John Rahul",asst:"Stanley Saboo",stores:17,qty:4128,val:40265.46,dam:3002.71,exp:30487.81,qal:2669.32,lqd:747.73,rtv:16.58,tnl:3341.31,fefo:13010.80,nfefo:27254.66,ds:1913.15,ins:28574.66},
+{m:"2026-05",AM:"Balaji R",asst:"—",stores:14,qty:3243,val:29502.48,dam:4229.75,exp:21164.73,qal:2821.94,lqd:925.23,rtv:35.35,tnl:324.74,fefo:10240.52,nfefo:19261.96,ds:1373.87,ins:19790.86},
+{m:"2026-05",AM:"John Rahul",asst:"Ratnesh Mishra",stores:13,qty:2846,val:26700.36,dam:2437.72,exp:18648.26,qal:4788.26,lqd:413.53,rtv:182.48,tnl:208.51,fefo:9275.83,nfefo:17424.53,ds:837.54,ins:17810.72},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Puneet Mahajan",stores:11,qty:1939,val:25508.71,dam:935.66,exp:21169.54,qal:1936.17,lqd:262.26,rtv:55.94,tnl:497.45,fefo:5306.80,nfefo:20201.91,ds:369.85,ins:20799.69},
+{m:"2026-05",AM:"Bhavuk Chawla",asst:"—",stores:15,qty:2856,val:24777.74,dam:1735.39,exp:18579.70,qal:3649.42,lqd:663.96,rtv:68.99,tnl:66,fefo:8835.14,nfefo:15942.60,ds:829.17,ins:17750.53},
+{m:"2026-05",AM:"Ritesh Kaushik",asst:"—",stores:11,qty:2263,val:19384.38,dam:2840.40,exp:12131.35,qal:3278.55,lqd:387.61,rtv:72.56,tnl:458.87,fefo:7262.46,nfefo:12121.92,ds:919.84,ins:11211.51},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Ahmed Zeyada",stores:15,qty:1878,val:17177.98,dam:1027.31,exp:14406.32,qal:1167.74,lqd:336.49,rtv:112.80,tnl:28.78,fefo:4678.66,nfefo:12499.32,ds:774.16,ins:13632.16},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Raghu Lloor",stores:7,qty:1604,val:15355.61,dam:1192.55,exp:10824.01,qal:1451.98,lqd:558.08,rtv:32.64,tnl:1178.74,fefo:5009.51,nfefo:10346.10,ds:617.66,ins:10206.35},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Sandeep Pandey",stores:9,qty:1509,val:14473.13,dam:580.51,exp:11668.96,qal:1785.37,lqd:397.53,rtv:22.02,tnl:18.74,fefo:5980.39,nfefo:8492.74,ds:985.79,ins:10683.17},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Raghu Lloor 2",stores:6,qty:1111,val:11507.33,dam:1066.70,exp:8341.19,qal:1379.64,lqd:280.14,rtv:15.57,tnl:362.79,fefo:3811.72,nfefo:7695.61,ds:468.01,ins:7873.18},
+{m:"2026-05",AM:"Unassigned",asst:"—",stores:4,qty:1003,val:11469.70,dam:576.51,exp:8770.77,qal:1453.80,lqd:499.56,rtv:21.05,tnl:148.01,fefo:5700.51,nfefo:5769.19,ds:1041.70,ins:7729.07},
+{m:"2026-05",AM:"Parmod Thakur",asst:"Amr Maged",stores:4,qty:1034,val:7851.14,dam:1254,exp:3888.51,qal:2244.19,lqd:118.20,rtv:13,tnl:198.95,fefo:3128.87,nfefo:4722.27,ds:630.04,ins:3258.47},
+{m:"2026-05",AM:"John Rahul",asst:"Sandeep Pandey",stores:1,qty:268,val:2334.06,dam:215.08,exp:1244.54,qal:413.59,lqd:450.08,rtv:0,tnl:10.77,fefo:748.31,nfefo:1585.75,ds:85.24,ins:1159.30},
+// Apr 2026
+{m:"2026-04",AM:"Ijaz Ahmed",asst:"Mohsin Talib",stores:33,qty:92926,val:706339.89,dam:96142.30,exp:376025.61,qal:191227.63,lqd:28617.03,rtv:1723.27,tnl:9184.44,fefo:351423.58,nfefo:354916.31,ds:58171.37,ins:317854.24},
+{m:"2026-04",AM:"John Rahul",asst:"Stanley Saboo",stores:17,qty:60167,val:455093.86,dam:51130.78,exp:340449.20,qal:50940.16,lqd:3772.93,rtv:1277.90,tnl:5934.76,fefo:254391.70,nfefo:200702.16,ds:53898.16,ins:286551.04},
+{m:"2026-04",AM:"Balaji R",asst:"—",stores:14,qty:50356,val:388298.25,dam:73561.72,exp:229275.96,qal:66517.09,lqd:8006.95,rtv:1182.05,tnl:8150.04,fefo:192905.48,nfefo:195392.77,ds:34783.46,ins:194492.50},
+{m:"2026-04",AM:"John Rahul",asst:"Ratnesh Mishra",stores:13,qty:45406,val:353061.89,dam:46699.16,exp:218066.63,qal:69299.79,lqd:2656.34,rtv:1587.85,tnl:4909.37,fefo:174353.08,nfefo:178708.81,ds:28938.34,ins:189128.29},
+{m:"2026-04",AM:"Bhavuk Chawla",asst:"—",stores:15,qty:46301,val:343770.90,dam:36677.07,exp:243475.57,qal:55912.68,lqd:3188.17,rtv:877.59,tnl:2244.38,fefo:174195.35,nfefo:169575.55,ds:31314.08,ins:212161.49},
+{m:"2026-04",AM:"Ritesh Kaushik",asst:"—",stores:11,qty:31823,val:250646.81,dam:49627.97,exp:123542.90,qal:49321.72,lqd:4128.30,rtv:1033.71,tnl:17480.60,fefo:115336.32,nfefo:135310.49,ds:14675.45,ins:108867.45},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Ahmed Zeyada",stores:15,qty:26450,val:189990.01,dam:21344.51,exp:128407.73,qal:23500.04,lqd:2952.14,rtv:782.57,tnl:7848.53,fefo:78031.92,nfefo:111958.09,ds:18523.05,ins:109884.68},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Puneet Mahajan",stores:11,qty:24791,val:186218.40,dam:19164.82,exp:128608.90,qal:31702.76,lqd:1601.03,rtv:598.85,tnl:1564.85,fefo:85042.43,nfefo:101175.97,ds:10142.46,ins:118466.44},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Sandeep Pandey",stores:9,qty:23632,val:174466.92,dam:18994.58,exp:122417.66,qal:27741.74,lqd:2850.22,rtv:1244.16,tnl:898.87,fefo:94795.08,nfefo:79671.84,ds:15101.76,ins:107315.90},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Raghu Lloor",stores:7,qty:21287,val:156756.45,dam:15686.93,exp:114231.49,qal:18090.95,lqd:1573.61,rtv:940.38,tnl:5306.04,fefo:79648.76,nfefo:77107.69,ds:12969.91,ins:101261.58},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Amr Maged",stores:4,qty:16869,val:136544.14,dam:24388.44,exp:76937.45,qal:29971.98,lqd:2691.07,rtv:464.85,tnl:876.02,fefo:71014.37,nfefo:65529.77,ds:13610.91,ins:63326.54},
+{m:"2026-04",AM:"Parmod Thakur",asst:"Raghu Lloor 2",stores:6,qty:16650,val:124889.06,dam:12681.38,exp:80714.48,qal:28328.35,lqd:1239.56,rtv:574.88,tnl:901.74,fefo:60610.69,nfefo:64278.37,ds:9551.44,ins:71163.04},
+{m:"2026-04",AM:"Unassigned",asst:"—",stores:5,qty:6254,val:49287.92,dam:4999.31,exp:38324.01,qal:3429.50,lqd:1878.85,rtv:52.23,tnl:395.67,fefo:25078.33,nfefo:24209.59,ds:3983.44,ins:34340.57},
+{m:"2026-04",AM:"John Rahul",asst:"Sandeep Pandey",stores:1,qty:4749,val:30258.53,dam:3987.21,exp:13771.36,qal:12086.77,lqd:223.55,rtv:20.47,tnl:169.17,fefo:14048.89,nfefo:16209.64,ds:1759.32,ins:12012.04},
+// Mar 2026
+{m:"2026-03",AM:"Ijaz Ahmed",asst:"Mohsin Talib",stores:33,qty:123094,val:887276.64,dam:74350.38,exp:517081.10,qal:218719.98,lqd:16582.80,rtv:10277.16,tnl:45080.90,fefo:444203.63,nfefo:443073.01,ds:74586.93,ins:442494.17},
+{m:"2026-03",AM:"John Rahul",asst:"Stanley Saboo",stores:17,qty:67864,val:514412.76,dam:64594.27,exp:356581.92,qal:60712.52,lqd:3629.69,rtv:2941.73,tnl:24379.96,fefo:271998.22,nfefo:242414.54,ds:53893.42,ins:302688.50},
+{m:"2026-03",AM:"Bhavuk Chawla",asst:"—",stores:15,qty:57865,val:472093.82,dam:47448.62,exp:285072.64,qal:62550.47,lqd:5144.06,rtv:2999.56,tnl:66781.88,fefo:226915.31,nfefo:245178.51,ds:37523.16,ins:247549.48},
+{m:"2026-03",AM:"Balaji R",asst:"—",stores:14,qty:61480,val:470825.53,dam:82868.32,exp:273286.54,qal:69827.28,lqd:6722.27,rtv:2997.75,tnl:23045.21,fefo:246405.19,nfefo:224420.34,ds:44225.78,ins:229060.76},
+{m:"2026-03",AM:"John Rahul",asst:"Ratnesh Mishra",stores:13,qty:56706,val:445630,dam:52725.80,exp:257413.38,qal:84946.69,lqd:3328.52,rtv:3258.09,tnl:39313.65,fefo:222865,nfefo:222765,ds:32031.35,ins:225382.03},
+{m:"2026-03",AM:"Ritesh Kaushik",asst:"—",stores:11,qty:33180,val:285809.22,dam:51809.90,exp:143468.17,qal:47335.81,lqd:2500.36,rtv:1007.93,tnl:32622.07,fefo:130523.76,nfefo:155285.46,ds:11175.26,ins:132292.91},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Ahmed Zeyada",stores:15,qty:35646,val:253040.26,dam:23042.63,exp:154030.32,qal:43538.80,lqd:2567.54,rtv:1115.98,tnl:26532.55,fefo:99874.67,nfefo:153165.59,ds:23251.20,ins:130779.12},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Puneet Mahajan",stores:11,qty:30553,val:243787.23,dam:25427.15,exp:146166.03,qal:46164.06,lqd:6564.02,rtv:1152.72,tnl:17593.07,fefo:103667.14,nfefo:140120.09,ds:10311.83,ins:135854.20},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Sandeep Pandey",stores:9,qty:26968,val:203619.58,dam:23417.71,exp:138615.12,qal:29869.60,lqd:5333.85,rtv:1022.19,tnl:5339.53,fefo:108633.62,nfefo:94985.96,ds:15826.99,ins:122788.13},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Amr Maged",stores:4,qty:21287,val:179999.24,dam:22054.10,exp:104229.94,qal:30731.23,lqd:4117.23,rtv:1069.49,tnl:17135.46,fefo:86813.87,nfefo:93185.37,ds:14009.91,ins:90220.03},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Raghu Lloor",stores:7,qty:19709,val:146957.31,dam:15541.66,exp:103714.62,qal:14174.08,lqd:2566.61,rtv:583.03,tnl:9950.49,fefo:68705.26,nfefo:78252.05,ds:10317.31,ins:93397.31},
+{m:"2026-03",AM:"Parmod Thakur",asst:"Raghu Lloor 2",stores:6,qty:18354,val:132413.73,dam:12693.08,exp:87287.35,qal:24093.97,lqd:1336.28,rtv:715.87,tnl:5910.66,fefo:68889.46,nfefo:63524.27,ds:7637.75,ins:79649.60},
+{m:"2026-03",AM:"Unassigned",asst:"—",stores:2,qty:6480,val:44778.10,dam:4965.25,exp:37510.51,qal:1530.06,lqd:83.39,rtv:310.17,tnl:378.72,fefo:21905.24,nfefo:22872.86,ds:3469.29,ins:34041.22},
+{m:"2026-03",AM:"John Rahul",asst:"Sandeep Pandey",stores:1,qty:5376,val:35914.30,dam:3696.15,exp:21377.36,qal:9919.10,lqd:199.01,rtv:276.14,tnl:446.54,fefo:19815.78,nfefo:16098.52,ds:5810.11,ins:15567.25},
+// Feb 2026
+{m:"2026-02",AM:"Ijaz Ahmed",asst:"Mohsin Talib",stores:30,qty:89221,val:584999.66,dam:55498.17,exp:296519.84,qal:168272.21,lqd:3716.85,rtv:48236.77,tnl:11033.02,fefo:290084.80,nfefo:294914.86,ds:41321.60,ins:255198.24},
+{m:"2026-02",AM:"John Rahul",asst:"Stanley Saboo",stores:15,qty:56054,val:391374.36,dam:55544.31,exp:207541.21,qal:95477.33,lqd:2438.17,rtv:25437.21,tnl:3310.84,fefo:197962.21,nfefo:193412.15,ds:19983.92,ins:187557.29},
+{m:"2026-02",AM:"Balaji R",asst:"—",stores:14,qty:52280,val:364134.29,dam:61830.93,exp:177710.03,qal:96466.66,lqd:3333.55,rtv:19158.91,tnl:4798.06,fefo:181595.29,nfefo:182539,ds:19706.40,ins:158003.63},
+{m:"2026-02",AM:"John Rahul",asst:"Ratnesh Mishra",stores:13,qty:53257,val:360291.47,dam:42558.71,exp:172753.78,qal:117600.75,lqd:7244.85,rtv:13248.42,tnl:5903.02,fefo:166444.73,nfefo:193846.74,ds:15105.42,ins:157648.36},
+{m:"2026-02",AM:"Bhavuk Chawla",asst:"—",stores:14,qty:50266,val:332201.45,dam:31357.75,exp:212182.78,qal:62235.71,lqd:2294.78,rtv:17830.18,tnl:4881.72,fefo:152875.73,nfefo:179325.72,ds:24016.59,ins:188166.19},
+{m:"2026-02",AM:"Parmod Thakur",asst:"Ahmed Zeyada",stores:15,qty:34053,val:240389.55,dam:18909.73,exp:122144.42,qal:46489.24,lqd:1932.39,rtv:32452.60,tnl:15602.89,fefo:79349.21,nfefo:161040.34,ds:16508.21,ins:105636.21},
+{m:"2026-02",AM:"Ritesh Kaushik",asst:"—",stores:11,qty:25242,val:183098.78,dam:26000.09,exp:101526.37,qal:36816.06,lqd:1627.65,rtv:12076.06,tnl:4674.94,fefo:89943.47,nfefo:93155.31,ds:6849.70,ins:94676.67},
+{m:"2026-02",AM:"Parmod Thakur",asst:"Puneet Mahajan",stores:11,qty:26135,val:177510.79,dam:15416.52,exp:110669.07,qal:43825.91,lqd:1181.87,rtv:4193.65,tnl:1575.30,fefo:82841.11,nfefo:94669.68,ds:9814.69,ins:100854.38}
+];
+
+// Store-level breakdown (Apr 2026 sample — expand per month as needed)
+const AM_STORES = [
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS76",sn:"JVC 4",qty:216,val:3255.13,dam:197.18,exp:2847.23,qal:98.20,lqd:112.52},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS65",sn:"JVC 3",qty:294,val:3079.25,dam:538.87,exp:2008.98,qal:294.88,lqd:235.78},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS93",sn:"DIP 2",qty:156,val:2695.53,dam:29.12,exp:2422.16,qal:51.15,lqd:193.10},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS13",sn:"Motor City",qty:206,val:2660.83,dam:32.29,exp:2394.90,qal:150.13,lqd:83.51},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS07",sn:"JVC",qty:359,val:2632.88,dam:779.54,exp:1305.05,qal:451.32,lqd:93},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS55",sn:"Dubai Sports City",qty:281,val:2488.51,dam:456.60,exp:1187.66,qal:408.01,lqd:8},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS34",sn:"Furjan",qty:404,val:2433.44,dam:727.44,exp:1394.29,qal:311.71,lqd:0},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS108",sn:"Jabal Ali Ind.",qty:222,val:2330.39,dam:99.97,exp:2119.87,qal:43.55,lqd:67},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS49",sn:"Dubai Studio City",qty:263,val:2286.67,dam:318.73,exp:1852.43,qal:108.70,lqd:0},
+{m:"2026-05",AM:"Balaji R",sc:"DXBDS37",sn:"JVC Circle",qty:298,val:2156.97,dam:173.98,exp:1738.53,qal:240.49,lqd:0},
+{m:"2026-05",AM:"Bhavuk Chawla",sc:"DXBDS43",sn:"Dubai Marina 2",qty:307,val:3132.74,dam:157.50,exp:2357.91,qal:493.19,lqd:56.26},
+{m:"2026-05",AM:"Bhavuk Chawla",sc:"DXBDS91",sn:"Marina 3",qty:234,val:2898.81,dam:84.26,exp:2393.07,qal:418.89,lqd:0},
+{m:"2026-05",AM:"Bhavuk Chawla",sc:"DXBDS60",sn:"Arjan 2",qty:192,val:2302.59,dam:89.87,exp:1999.05,qal:213.67,lqd:0},
+{m:"2026-05",AM:"Bhavuk Chawla",sc:"DXBDS32",sn:"Al Barsha Third",qty:245,val:1969.94,dam:266.89,exp:1095.15,qal:478.71,lqd:84.39},
+{m:"2026-05",AM:"Bhavuk Chawla",sc:"DXBDS05",sn:"Al Barsha",qty:267,val:1829.77,dam:111.85,exp:1193.22,qal:299.66,lqd:225.04},
+{m:"2026-05",AM:"Ijaz Ahmed",sc:"AUHDS24",sn:"Al Zahiyah 2",qty:268,val:2403.57,dam:191.44,exp:1840.11,qal:265.64,lqd:106.38},
+{m:"2026-05",AM:"Ijaz Ahmed",sc:"AUHDS28",sn:"Al Shamkha 2",qty:144,val:2336.02,dam:88.29,exp:2071.84,qal:175.89,lqd:0},
+{m:"2026-05",AM:"Ijaz Ahmed",sc:"AUHDS23",sn:"AL Shawamekh",qty:219,val:2196.94,dam:315.68,exp:1748.82,qal:115.41,lqd:17.03},
+{m:"2026-05",AM:"Ijaz Ahmed",sc:"AUHDS36",sn:"Al Mafraq",qty:338,val:2021.22,dam:0,exp:1424.51,qal:596.71,lqd:0},
+{m:"2026-05",AM:"Ijaz Ahmed",sc:"AUHDS10",sn:"Raha Beach",qty:254,val:1916.60,dam:426.60,exp:889.66,qal:537.43,lqd:3.50},
+// Apr 2026 top stores
+{m:"2026-04",AM:"Ijaz Ahmed",sc:"SHJDS13",sn:"Al Tay East",qty:250,val:2723.75,dam:38.21,exp:2310.09,qal:206.67,lqd:0},
+{m:"2026-04",AM:"Ijaz Ahmed",sc:"SHJDS19",sn:"Al Majaz 4",qty:160,val:2179.65,dam:70.85,exp:1929.25,qal:0,lqd:0},
+{m:"2026-04",AM:"Balaji R",sc:"DXBDS34",sn:"Furjan",qty:213,val:1414.78,dam:410.11,exp:831.95,qal:172.72,lqd:0},
+{m:"2026-04",AM:"John Rahul",sc:"DXBDS47",sn:"Town Square 2",qty:215,val:1390.48,dam:254.87,exp:859.60,qal:32.72,lqd:0},
+{m:"2026-04",AM:"Balaji R",sc:"DXBDS07",sn:"JVC",qty:206,val:1365.28,dam:432.12,exp:725.69,qal:110.50,lqd:0},
+{m:"2026-04",AM:"Ritesh Kaushik",sc:"DXBDS22",sn:"Downtown Dubai",qty:219,val:1316.05,dam:208.88,exp:454.55,qal:487.69,lqd:0},
+{m:"2026-04",AM:"Bhavuk Chawla",sc:"DXBDS45",sn:"Sobha Hartland",qty:140,val:1199.75,dam:223.20,exp:586.44,qal:333.85,lqd:0},
+{m:"2026-04",AM:"Ritesh Kaushik",sc:"DXBDS98",sn:"Al Satwa 3",qty:183,val:1190.87,dam:119.93,exp:293.29,qal:608.23,lqd:0},
+{m:"2026-04",AM:"Bhavuk Chawla",sc:"DXBDS69",sn:"Al Satwa 2",qty:132,val:1136.23,dam:120.46,exp:701.04,qal:287.59,lqd:0},
+{m:"2026-04",AM:"Ritesh Kaushik",sc:"DXBDS68",sn:"Al Jeddaf",qty:148,val:1119.39,dam:69.64,exp:688.24,qal:350.74,lqd:0}
+];
+
+// ══════════════════════════════════════════════════════
+//  MONTH STATE + FILTER
+// ══════════════════════════════════════════════════════
+// cMonth declared above with cPeriod — no redeclaration needed
+
+function getAMRows(){
+  if(cMonth==="ALL") return AM_RAW;
+  return AM_RAW.filter(r=>r.m===cMonth);
+}
+function getStoreRows(am){
+  if(cMonth==="ALL") return AM_STORES.filter(r=>r.AM===am);
+  return AM_STORES.filter(r=>r.AM===am && r.m===cMonth);
+}
+
+// ══════════════════════════════════════════════════════
+//  AM RENDER
+// ══════════════════════════════════════════════════════
+function renderAM(){
+  const rows = getAMRows();
+  const label = cMonth==="ALL"?"All Months":new Date(cMonth+"-15").toLocaleString("en-AE",{month:"long",year:"numeric"});
+  document.getElementById("s8-badge").textContent = "Dynamic · "+label;
+
+  // Aggregate by AM
+  const amMap={};
+  rows.forEach(r=>{
+    if(!amMap[r.AM])amMap[r.AM]={AM:r.AM,assts:new Set(),stores:0,qty:0,val:0,dam:0,exp:0,qal:0,lqd:0,rtv:0,tnl:0,fefo:0,nfefo:0,ds:0,ins:0};
+    const a=amMap[r.AM];
+    if(r.asst!=="—")a.assts.add(r.asst);
+    a.stores+=r.stores; a.qty+=r.qty; a.val+=r.val;
+    a.dam+=r.dam; a.exp+=r.exp; a.qal+=r.qal;
+    a.lqd+=r.lqd; a.rtv+=r.rtv; a.tnl+=r.tnl;
+    a.fefo+=r.fefo; a.nfefo+=r.nfefo;
+    a.ds+=r.ds; a.ins+=r.ins;
+  });
+  const ams=Object.values(amMap).sort((a,b)=>b.val-a.val);
+  const grandTotal=ams.reduce((s,a)=>s+a.val,0);
+
+  // KPIs
+  document.getElementById("amk-count").textContent=ams.filter(a=>a.AM!=="Unassigned").length;
+  document.getElementById("amk-stores").textContent=fc(ams.reduce((s,a)=>s+a.stores,0));
+  document.getElementById("amk-val").textContent=(grandTotal>=1e6?(grandTotal/1e6).toFixed(2)+"M":(grandTotal/1e3).toFixed(1)+"K");
+  document.getElementById("amk-dam").textContent=(()=>{const v=ams.reduce((s,a)=>s+a.dam,0);return v>=1e6?(v/1e6).toFixed(2)+"M":(v/1e3).toFixed(1)+"K";})();
+  document.getElementById("amk-exp").textContent=(()=>{const v=ams.reduce((s,a)=>s+a.exp,0);return v>=1e6?(v/1e6).toFixed(2)+"M":(v/1e3).toFixed(1)+"K";})();
+  document.getElementById("amk-qal").textContent=(()=>{const v=ams.reduce((s,a)=>s+a.qal,0);return v>=1e6?(v/1e6).toFixed(2)+"M":(v/1e3).toFixed(1)+"K";})();
+
+  // Cards
+  const container=document.getElementById("amCards");
+  container.innerHTML=ams.map((a,i)=>{
+    const pct=grandTotal?(a.val/grandTotal*100).toFixed(1):0;
+    const expPct=a.exp?(a.ds/a.exp*100).toFixed(1):0;
+    const insPct=a.exp?(a.ins/a.exp*100).toFixed(1):0;
+    const assts=[...a.assts].join(", ")||"—";
+    const id="am-"+a.AM.replace(/\s+/g,"_");
+    const storeRows=getStoreRows(a.AM);
+    const big=v=>v>=1e6?(v/1e6).toFixed(2)+"M":v>=1e3?(v/1e3).toFixed(1)+"K":fd(v);
+
+    const storeHtml=storeRows.length?`
+      <div class="am-sub-hdr"><span class="am-sub-label">&#9644; Store Breakdown (Top ${Math.min(storeRows.length,15)})</span></div>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="background:#0d1b3e">
+          <th style="padding:7px 10px;text-align:left;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#c9a227;border-right:1px solid #1e3060">Store</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#fff;border-right:1px solid #1e3060">Qty</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#c9a227;border-right:1px solid #1e3060">NL Value</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#f5a623;border-right:1px solid #1e3060">Damage</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#f05252;border-right:1px solid #1e3060">Expiry</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#a78bfa;border-right:1px solid #1e3060">Quality</th>
+          <th style="padding:7px 10px;text-align:right;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#4da6ff">LQD</th>
+        </tr></thead>
+        <tbody>${storeRows.sort((a,b)=>b.val-a.val).slice(0,15).map((s,si)=>`
+          <tr style="border-bottom:1px solid #eaedf5;background:${si%2?"#f8faff":"#fff"}">
+            <td style="padding:7px 10px">
+              <div style="font-weight:600;font-size:12px">${s.sn}</div>
+              <div style="font-family:monospace;font-size:10px;color:#9aaabb">${s.sc}</div>
+            </td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px">${fc(s.qty)}</td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px;font-weight:700;color:#c9a227">${fd(s.val)}</td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px;color:#e07020">${s.dam?fd(s.dam):"—"}</td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px;color:#c0392b">${s.exp?fd(s.exp):"—"}</td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px;color:#7a55cc">${s.qal?fd(s.qal):"—"}</td>
+            <td style="padding:7px 10px;text-align:right;font-family:monospace;font-size:11px;color:#2175c8">${s.lqd?fd(s.lqd):"—"}</td>
+          </tr>`).join("")}
+          <tr style="background:#0d1b3e">
+            <td style="padding:8px 10px;font-weight:800;color:#c9a227;font-size:11px" colspan="2">STORE TOTAL</td>
+            <td style="padding:8px 10px;text-align:right;font-family:monospace;font-size:12px;font-weight:800;color:#c9a227">${fd(storeRows.reduce((s,r)=>s+r.val,0))}</td>
+            <td style="padding:8px 10px;text-align:right;font-family:monospace;font-size:11px;color:#f5a623">${fd(storeRows.reduce((s,r)=>s+r.dam,0))}</td>
+            <td style="padding:8px 10px;text-align:right;font-family:monospace;font-size:11px;color:#f05252">${fd(storeRows.reduce((s,r)=>s+r.exp,0))}</td>
+            <td style="padding:8px 10px;text-align:right;font-family:monospace;font-size:11px;color:#a78bfa">${fd(storeRows.reduce((s,r)=>s+r.qal,0))}</td>
+            <td style="padding:8px 10px;text-align:right;font-family:monospace;font-size:11px;color:#4da6ff">${fd(storeRows.reduce((s,r)=>s+r.lqd,0))}</td>
+          </tr>
+        </tbody>
+      </table></div>`
+    :`<div style="padding:14px 16px;font-size:11px;color:#7a8aaa;font-style:italic">Store-level detail available for May 2026 data. Select May 2026 to view store breakdown.</div>`;
+
+    return`<div class="am-card" style="border-radius:6px;overflow:hidden;margin-bottom:6px;box-shadow:0 1px 4px rgba(13,27,62,.08)">
+      <div class="am-hdr" onclick="toggleAM('${id}')" id="hdr-${id}">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:800;color:#0d1b3e;background:#e8f0fe;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
+          <div>
+            <div class="am-name">${a.AM}</div>
+            <div class="am-meta">${a.stores} stores &nbsp;·&nbsp; ${fc(a.qty)} units</div>
+          </div>
+        </div>
+        <div class="am-chips">
+          <span class="chip chip-o">&#9632; Dmg ${big(a.dam)}</span>
+          <span class="chip chip-r">&#9632; Exp ${big(a.exp)}</span>
+          <span class="chip chip-p">&#9632; Qal ${big(a.qal)}</span>
+          <span class="chip chip-b">&#9632; LQD ${big(a.lqd)}</span>
+          <span class="chip chip-rd">DS ${expPct}%</span>
+          <span class="chip chip-g">INS ${insPct}%</span>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:8px">
+          <div class="am-val-pill">AED ${big(a.val)}</div>
+          <div style="font-size:10px;color:#7a8aaa;margin-top:3px">${pct}% of total</div>
+          <div style="margin-top:4px">
+            <div style="width:100px;height:4px;background:#eef0f5;border-radius:2px;overflow:hidden;display:inline-block">
+              <div style="width:${pct}%;height:100%;background:${i<2?"#c9a227":i<4?"#1a3166":"#7a8aaa"};border-radius:2px"></div>
+            </div>
+          </div>
+        </div>
+        <span class="am-toggle" id="tog-${id}">&#9660;</span>
+      </div>
+      <div class="am-body" id="body-${id}">
+        <!-- Metric breakdown row -->
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:0;background:#fff;border-bottom:1px solid #eaedf5">
+          ${[
+            {l:"FEFO Val",v:a.fefo,c:"#2196a6"},
+            {l:"Non-FEFO",v:a.nfefo,c:"#7a55cc"},
+            {l:"Damage",v:a.dam,c:"#e07020"},
+            {l:"Expiry",v:a.exp,c:"#c0392b"},
+            {l:"Quality",v:a.qal,c:"#7a55cc"},
+            {l:"DS Bucket",v:a.ds,c:"#e05050"},
+            {l:"Instock",v:a.ins,c:"#27ae60"}
+          ].map(x=>`<div style="padding:10px 8px;text-align:center;border-right:1px solid #eaedf5">
+            <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#7a8aaa;margin-bottom:4px">${x.l}</div>
+            <div style="font-size:14px;font-weight:800;color:${x.c}">${big(x.v)}</div>
+          </div>`).join("")}
+        </div>
+        ${storeHtml}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function toggleAM(id){
+  const body=document.getElementById("body-"+id);
+  const tog=document.getElementById("tog-"+id);
+  const hdr=document.getElementById("hdr-"+id);
+  const open=body.classList.toggle("open");
+  tog.classList.toggle("open",open);
+  hdr.classList.toggle("open",open);
+}
+
+// ══════════════════════════════════════════════════════
+//  PER-SECTION DOWNLOAD + EMAIL
+// ══════════════════════════════════════════════════════
+function getTableCSV(tableId){
+  const tbl=document.getElementById(tableId);
+  if(!tbl)return null;
+  const rows=[...tbl.querySelectorAll("tr")];
+  return rows.map(r=>[...r.querySelectorAll("th,td")].map(c=>'"'+c.innerText.replace(/"/g,'""')+'"').join(",")).join("\n");
+}
+
+function dlSection(sec){
+  const label=document.getElementById("s1-period-badge")?.textContent||"export";
+  const maps={
+    "summary": ["kpiGrid"],
+    "loc":     ["tbl-loc"],
+    "partner": ["tbl-pt"],
+    "fefo":    ["tbl-fefo"],
+    "nfefo":   ["tbl-nfefo"],
+    "nfefo-ov":["tbl-nfefo-ov"],
+    "deep":    ["tbl-bot-dmg","tbl-bot-qal","tbl-bot-stores"],
+    "am":      ["tbl-am"]  // AM table rendered inline
+  };
+  const ids=maps[sec]||[];
+  const parts=ids.map(id=>getTableCSV(id)).filter(Boolean);
+  if(!parts.length){
+    // fallback: export filtered RAW rows for that section
+    dlCSV(); return;
+  }
+  const csv=parts.join("\n\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download=`NL_Sec_${sec}_${label.replace(/\s+/g,"_")}.csv`;
+  a.click();
+}
+
+function emailSection(sec){
+  const rows=getRows();
+  const period=document.getElementById("s1-period-badge")?.textContent||"Selected Period";
+  const total=rows.reduce((s,r)=>s+f(r.val),0);
+  const titles={
+    "summary":"Overall Summary",
+    "loc":"Location Bifurcation",
+    "partner":"9411 vs Non-9411 Split",
+    "fefo":"FEFO Category Split",
+    "nfefo":"Non-FEFO Category Split",
+    "nfefo-ov":"Non-FEFO Overall View",
+    "deep":"Deeper Analysis — Bottom Drivers",
+    "am":"Area Manager Performance",
+    "breaking":"What's Breaking — Category Drill-Down"
+  };
+  const sTitle=titles[sec]||sec;
+
+  // Build section-specific body
+  let body=`NON-LIVE BUCKETING — ${sTitle}\nPeriod: ${period} | Generated: 2026-05-03\n${"─".repeat(48)}\n`;
+
+  if(sec==="summary"){
+    const dmg=rows.filter(r=>r.ot==="Damage").reduce((s,r)=>s+f(r.val),0);
+    const exp=rows.filter(r=>r.ot==="Expiry").reduce((s,r)=>s+f(r.val),0);
+    const qal=rows.filter(r=>r.ot==="Quality Rejection").reduce((s,r)=>s+f(r.val),0);
+    const fefo=rows.filter(r=>r.ff==="FEFO").reduce((s,r)=>s+f(r.val),0);
+    const nfefo=rows.filter(r=>r.ff==="NonFEFO").reduce((s,r)=>s+f(r.val),0);
+    body+=`Total NL Value : AED ${fc(total)}\nFEFO Tracked  : AED ${fc(fefo)} (${fp(fefo,total)})\nNon-FEFO      : AED ${fc(nfefo)} (${fp(nfefo,total)})\nDamage        : AED ${fc(dmg)} (${fp(dmg,total)})\nExpiry        : AED ${fc(exp)} (${fp(exp,total)})\nQuality Rej.  : AED ${fc(qal)} (${fp(qal,total)})`;
+  } else if(sec==="loc"){
+    const m={};rows.forEach(r=>{if(!m[r.ot])m[r.ot]={qty:0,val:0};m[r.ot].qty+=r.qty;m[r.ot].val+=f(r.val);});
+    body+=Object.entries(m).sort((a,b)=>b[1].val-a[1].val).map(([k,v])=>`${k.padEnd(20)} AED ${fc(v.val)}  (${fp(v.val,total)})`).join("\n");
+  } else if(sec==="fefo"){
+    const fefoRows=rows.filter(r=>r.ff==="FEFO");
+    const m={};fefoRows.forEach(r=>{if(!m[r.cat])m[r.cat]={exp:0,dam:0,qal:0,tot:0};const c=m[r.cat];const v=f(r.val);c.tot+=v;if(r.ot==="Expiry")c.exp+=v;else if(r.ot==="Damage")c.dam+=v;else if(r.ot==="Quality Rejection")c.qal+=v;});
+    body+=Object.entries(m).sort((a,b)=>b[1].tot-a[1].tot).map(([cat,v])=>`${cat.padEnd(22)} Total: AED ${fc(v.tot)}  Exp: ${fc(v.exp)}  Dmg: ${fc(v.dam)}  Qal: ${fc(v.qal)}`).join("\n");
+  } else if(sec==="am"){
+    const amRows=getAMRows();const m={};
+    amRows.forEach(r=>{if(!m[r.AM])m[r.AM]={val:0,stores:0};m[r.AM].val+=r.val;m[r.AM].stores+=r.stores;});
+    body+=Object.entries(m).sort((a,b)=>b[1].val-a[1].val).map(([am,v])=>`${am.padEnd(20)} AED ${fc(v.val)}  Stores: ${v.stores}`).join("\n");
+  } else {
+    body+=`Total NL Value: AED ${fc(total)}\nFor full breakdown, see attached CSV.`;
+  }
+
+  const sub=encodeURIComponent(`[NON-LIVE OPS] ${sTitle} | ${period} | 2026-05-03`);
+  window.open(`mailto:?subject=${sub}&body=${encodeURIComponent(body)}`);
+}
+// ══════════════════════════════════════════════════════
+let refreshSeconds = 7200; // 2 hours
+function startCountdown(){
+  const el = document.getElementById("refreshCountdown");
+  setInterval(()=>{
+    refreshSeconds--;
+    if(refreshSeconds<=0){
+      forceRefresh(); return;
+    }
+    const h=Math.floor(refreshSeconds/3600);
+    const m=Math.floor((refreshSeconds%3600)/60);
+    const s=refreshSeconds%60;
+    el.textContent=`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  },1000);
+}
+function forceRefresh(){
+  sessionStorage.setItem("nl_refresh","1");
+  window.location.reload();
+}
+// Check if we just refreshed
+if(sessionStorage.getItem("nl_refresh")){
+  sessionStorage.removeItem("nl_refresh");
+  const el=document.getElementById("refreshCountdown");
+  if(el)el.textContent="Just refreshed";
+}
+
+// ══════════════════════════════════════════════════════
+//  SECTION 9: WHAT'S BREAKING — DATA + LOGIC
+// ══════════════════════════════════════════════════════
+const BREAKING_CAT=[
+  {m:"2026-05",cat:"Baby",         ot:"Expiry",            qty:1471, val:75001,stores:137,skus:143,wrongKL:961, wrongKLVal:75001,avgDiff:162.9,maxDiff:225},
+  {m:"2026-05",cat:"Fruits & Veg.",ot:"Quality Rejection", qty:6973, val:30320,stores:157,skus:258,wrongKL:0,   wrongKLVal:0,    avgDiff:0.8,  maxDiff:21},
+  {m:"2026-05",cat:"Bakery",       ot:"Expiry",            qty:5525, val:27100,stores:160,skus:240,wrongKL:51,  wrongKLVal:906,  avgDiff:3.0,  maxDiff:102},
+  {m:"2026-05",cat:"Meat & Seafood",ot:"Expiry",           qty:1531, val:23994,stores:151,skus:99, wrongKL:0,   wrongKLVal:0,    avgDiff:3.4,  maxDiff:21},
+  {m:"2026-05",cat:"Fruits & Veg.",ot:"Expiry",            qty:4498, val:21795,stores:132,skus:238,wrongKL:0,   wrongKLVal:0,    avgDiff:1.2,  maxDiff:21},
+  {m:"2026-05",cat:"Dairy & Eggs", ot:"Expiry",            qty:1885, val:13999,stores:154,skus:220,wrongKL:0,   wrongKLVal:0,    avgDiff:7.4,  maxDiff:21},
+  {m:"2026-05",cat:"Beverages",    ot:"Expiry",            qty:1377, val:10284,stores:150,skus:127,wrongKL:0,   wrongKLVal:0,    avgDiff:1.9,  maxDiff:21},
+  {m:"2026-05",cat:"-",            ot:"Expiry",            qty:437,  val:9926, stores:128,skus:58, wrongKL:19,  wrongKLVal:1274, avgDiff:17.6, maxDiff:219},
+  {m:"2026-05",cat:"Flowers",      ot:"Expiry",            qty:243,  val:9187, stores:58, skus:15, wrongKL:0,   wrongKLVal:0,    avgDiff:0.2,  maxDiff:1},
+  {m:"2026-05",cat:"Ready To Go",  ot:"Expiry",            qty:653,  val:7639, stores:112,skus:82, wrongKL:1,   wrongKLVal:11,   avgDiff:0.9,  maxDiff:110},
+  {m:"2026-05",cat:"Dairy & Eggs", ot:"Damage",            qty:584,  val:4973, stores:133,skus:162,wrongKL:0,   wrongKLVal:0,    avgDiff:11.6, maxDiff:21},
+  {m:"2026-05",cat:"Meat & Seafood",ot:"Quality Rejection",qty:341,  val:4877, stores:61, skus:70, wrongKL:0,   wrongKLVal:0,    avgDiff:4.0,  maxDiff:21},
+  {m:"2026-05",cat:"Milk & Alt.",  ot:"Expiry",            qty:893,  val:4641, stores:142,skus:51, wrongKL:0,   wrongKLVal:0,    avgDiff:2.5,  maxDiff:21},
+  {m:"2026-05",cat:"Baby",         ot:"Liquidation",       qty:27,   val:1577, stores:21, skus:3,  wrongKL:20,  wrongKLVal:1541, avgDiff:77.5, maxDiff:219},
+  {m:"2026-05",cat:"Baby",         ot:"Damage",            qty:26,   val:1062, stores:18, skus:23, wrongKL:24,  wrongKLVal:1062, avgDiff:207.1,maxDiff:225},
+  {m:"2026-05",cat:"Baby",         ot:"Temp NL",           qty:7,    val:796,  stores:6,  skus:6,  wrongKL:7,   wrongKLVal:796,  avgDiff:150.9,maxDiff:219},
+  {m:"2026-05",cat:"Bakery",       ot:"Damage",            qty:306,  val:1311, stores:88, skus:121,wrongKL:3,   wrongKLVal:68,   avgDiff:4.0,  maxDiff:102},
+  {m:"2026-05",cat:"Water & Ice",  ot:"Damage",            qty:448,  val:2639, stores:78, skus:44, wrongKL:4,   wrongKLVal:48,   avgDiff:20.8, maxDiff:60},
+  {m:"2026-05",cat:"Flowers",      ot:"Liquidation",       qty:45,   val:2538, stores:18, skus:2,  wrongKL:0,   wrongKLVal:0,    avgDiff:0.9,  maxDiff:21},
+  {m:"2026-05",cat:"Household",    ot:"Damage",            qty:102,  val:2330, stores:63, skus:76, wrongKL:0,   wrongKLVal:0,    avgDiff:20.8, maxDiff:21},
+  {m:"2026-04",cat:"Meat & Seafood",ot:"Expiry",           qty:24521,val:366331,stores:137,skus:137,wrongKL:0,  wrongKLVal:0,    avgDiff:3.5,  maxDiff:21},
+  {m:"2026-04",cat:"Bakery",       ot:"Expiry",            qty:73649,val:362246,stores:160,skus:344,wrongKL:820,wrongKLVal:8200, avgDiff:3.1,  maxDiff:102},
+  {m:"2026-04",cat:"Dairy & Eggs", ot:"Expiry",            qty:34360,val:235795,stores:131,skus:461,wrongKL:0,  wrongKLVal:0,    avgDiff:7.2,  maxDiff:21},
+  {m:"2026-04",cat:"Baby",         ot:"Expiry",            qty:1820, val:80200,stores:140,skus:148,wrongKL:1820,wrongKLVal:80200,avgDiff:165.0,maxDiff:225},
+  {m:"2026-04",cat:"Beverages",    ot:"Expiry",            qty:21407,val:152409,stores:130,skus:393,wrongKL:180,wrongKLVal:2100, avgDiff:2.0,  maxDiff:22},
+  {m:"2026-04",cat:"Milk & Alt.",  ot:"Expiry",            qty:18197,val:93554,stores:135,skus:62, wrongKL:0,  wrongKLVal:0,    avgDiff:2.3,  maxDiff:21},
+  {m:"2026-04",cat:"Dairy & Eggs", ot:"Damage",            qty:9334, val:92189,stores:157,skus:433,wrongKL:0,  wrongKLVal:0,    avgDiff:11.3, maxDiff:21},
+  {m:"2026-04",cat:"Ready To Go",  ot:"Expiry",            qty:8256, val:87207,stores:110,skus:110,wrongKL:82, wrongKLVal:910,  avgDiff:1.0,  maxDiff:110},
+  {m:"2026-04",cat:"Fruits & Veg.",ot:"Quality Rejection", qty:45000,val:88000,stores:155,skus:280,wrongKL:0,  wrongKLVal:0,    avgDiff:0.8,  maxDiff:21},
+  {m:"2026-04",cat:"Fruits & Veg.",ot:"Expiry",            qty:42000,val:75000,stores:150,skus:260,wrongKL:0,  wrongKLVal:0,    avgDiff:1.1,  maxDiff:21},
+  {m:"2026-04",cat:"Meat & Seafood",ot:"Quality Rejection",qty:5312,val:74431, stores:111,skus:111,wrongKL:0,  wrongKLVal:0,    avgDiff:4.0,  maxDiff:21},
+  {m:"2026-04",cat:"Milk & Alt.",  ot:"Damage",            qty:2349,val:22390,stores:120,skus:94,  wrongKL:12, wrongKLVal:155,  avgDiff:8.1,  maxDiff:55}
+];
+
+const BREAKING_STORES=[
+  {m:"2026-05",cat:"Baby",sc:"DXBDS81",sn:"Al Quoz 3",       ot:"Expiry",qty:35, val:3305,skus:26,wrongKL:26,wrongKLVal:3305,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS82",sn:"Al Garhoud",      ot:"Expiry",qty:62, val:3271,skus:32,wrongKL:33,wrongKLVal:3271,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"AJMDS06",sn:"Al Jurf",         ot:"Expiry",qty:64, val:3192,skus:32,wrongKL:32,wrongKLVal:3192,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS15",sn:"Al Qusais",       ot:"Expiry",qty:33, val:2202,skus:24,wrongKL:25,wrongKLVal:2202,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS92",sn:"Al Mankhoul 2",   ot:"Expiry",qty:32, val:2178,skus:15,wrongKL:15,wrongKLVal:2178,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS67",sn:"Bur Dubai 3",     ot:"Expiry",qty:29, val:2081,skus:22,wrongKL:22,wrongKLVal:2081,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS100",sn:"Hor Al Anz",     ot:"Expiry",qty:27, val:1878,skus:18,wrongKL:21,wrongKLVal:1878,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS86",sn:"Al Mankhoul",     ot:"Expiry",qty:50, val:1845,skus:29,wrongKL:29,wrongKLVal:1845,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS101",sn:"Hor Al Anz 2",   ot:"Expiry",qty:34, val:1821,skus:17,wrongKL:17,wrongKLVal:1821,maxDiff:219},
+  {m:"2026-05",cat:"Baby",sc:"DXBDS74",sn:"DSO 3",           ot:"Expiry",qty:32, val:1683,skus:24,wrongKL:24,wrongKLVal:1683,maxDiff:219},
+  {m:"2026-05",cat:"Bakery",sc:"SHJDS13",sn:"Al Tay East",          ot:"Expiry",qty:158,val:726,skus:95,wrongKL:0,wrongKLVal:0,maxDiff:11},
+  {m:"2026-05",cat:"Bakery",sc:"DXBDS105",sn:"Al Barsha Heights 2", ot:"Expiry",qty:123,val:623,skus:74,wrongKL:0,wrongKLVal:0,maxDiff:6},
+  {m:"2026-05",cat:"Bakery",sc:"DXBDS77",sn:"Al Nahda 3 Dubai",     ot:"Expiry",qty:103,val:542,skus:69,wrongKL:1,wrongKLVal:12,maxDiff:102},
+  {m:"2026-05",cat:"Bakery",sc:"SHJDS19",sn:"Al Majaz 4",           ot:"Expiry",qty:103,val:502,skus:65,wrongKL:0,wrongKLVal:0,maxDiff:9},
+  {m:"2026-05",cat:"Bakery",sc:"DXBDS66",sn:"International City 2", ot:"Expiry",qty:83, val:481,skus:53,wrongKL:1,wrongKLVal:12,maxDiff:102},
+  {m:"2026-05",cat:"Bakery",sc:"DXBDS76",sn:"JVC 4",                ot:"Expiry",qty:74, val:477,skus:34,wrongKL:1,wrongKLVal:48,maxDiff:102},
+  {m:"2026-05",cat:"Fruits & Veg.",sc:"DXBDS47",sn:"Town Square 2", ot:"Quality Rejection",qty:180,val:842,skus:40,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Fruits & Veg.",sc:"SHJDS19",sn:"Al Majaz 4",    ot:"Quality Rejection",qty:165,val:775,skus:36,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Fruits & Veg.",sc:"DXBDS22",sn:"Downtown Dubai", ot:"Quality Rejection",qty:150,val:701,skus:34,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Fruits & Veg.",sc:"DXBDS34",sn:"Furjan",         ot:"Quality Rejection",qty:142,val:662,skus:31,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Meat & Seafood",sc:"SHJDS13",sn:"Al Tay East",   ot:"Expiry",qty:38,val:596,skus:14,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Meat & Seafood",sc:"SHJDS19",sn:"Al Majaz 4",    ot:"Expiry",qty:35,val:554,skus:12,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Meat & Seafood",sc:"DXBDS47",sn:"Town Square 2", ot:"Expiry",qty:40,val:631,skus:16,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Dairy & Eggs",sc:"DXBDS07",sn:"JVC",             ot:"Damage",qty:42,val:480,skus:22,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Dairy & Eggs",sc:"DXBDS34",sn:"Furjan",          ot:"Expiry",qty:65,val:501,skus:28,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-05",cat:"Dairy & Eggs",sc:"SHJDS13",sn:"Al Tay East",     ot:"Expiry",qty:58,val:452,skus:25,wrongKL:0,wrongKLVal:0,maxDiff:21},
+  {m:"2026-04",cat:"Baby",sc:"AUHDS24",sn:"Al Zahiyah 2",            ot:"Expiry",qty:48,val:3820,skus:28,wrongKL:48,wrongKLVal:3820,maxDiff:219},
+  {m:"2026-04",cat:"Baby",sc:"AUHDS28",sn:"Al Shamkha 2",            ot:"Expiry",qty:42,val:3310,skus:24,wrongKL:42,wrongKLVal:3310,maxDiff:219},
+  {m:"2026-04",cat:"Bakery",sc:"SHJDS13",sn:"Al Tay East",           ot:"Expiry",qty:1820,val:8200,skus:280,wrongKL:0,wrongKLVal:0,maxDiff:9},
+  {m:"2026-04",cat:"Bakery",sc:"SHJDS19",sn:"Al Majaz 4",            ot:"Expiry",qty:1650,val:7840,skus:250,wrongKL:0,wrongKLVal:0,maxDiff:8}
+];
+
+let cCat="ALL";
+
+function setCat(cat){
+  cCat=cat;
+  document.querySelectorAll(".cat-chip").forEach(c=>c.classList.toggle("active",c.dataset.cat===cat));
+  document.getElementById("s9-badge").textContent=cat==="ALL"?"All Categories — combined view":"Filtering: "+cat;
+  document.getElementById("breakingCatLabel").textContent=cat==="ALL"?"All Categories":cat;
+  renderBreaking();
+}
+
+function getBreakingData(){
+  const m=cMonth==="ALL"?null:cMonth;
+  let catRows=m?BREAKING_CAT.filter(r=>r.m===m):BREAKING_CAT;
+  let storeRows=m?BREAKING_STORES.filter(r=>r.m===m):BREAKING_STORES;
+  if(cCat!=="ALL"){catRows=catRows.filter(r=>r.cat===cCat);storeRows=storeRows.filter(r=>r.cat===cCat);}
+  return{catRows,storeRows};
+}
+
+function renderBreaking(){
+  const{catRows,storeRows}=getBreakingData();
+  // Build category chips from current month data
+  const m=cMonth==="ALL"?null:cMonth;
+  const cats=[...new Set((m?BREAKING_CAT.filter(r=>r.m===m):BREAKING_CAT).map(r=>r.cat))].sort();
+  document.getElementById("catChips").innerHTML=cats.map(c=>
+    `<button class="cat-chip${cCat===c?" active":""}" data-cat="${c}" onclick="setCat('${c}')">${c}</button>`).join("");
+
+  // Summary KPI tiles
+  const totVal=catRows.reduce((s,r)=>s+r.val,0);
+  const totWKLVal=catRows.reduce((s,r)=>s+r.wrongKLVal,0);
+  const totQty=catRows.reduce((s,r)=>s+r.qty,0);
+  const flaggedCats=[...new Set(catRows.filter(r=>r.wrongKL>0).map(r=>r.cat))].length;
+  const sorted=[...catRows].sort((a,b)=>b.val-a.val);
+  const topCat=sorted.length?sorted[0].cat:"—";
+  const big=v=>v>=1e6?(v/1e6).toFixed(2)+"M":v>=1e3?(v/1e3).toFixed(0)+"K":fc(v);
+
+  document.getElementById("breakingSummary").innerHTML=[
+    {l:"Total NL Value",    v:"AED "+big(totVal), c:"#0d1b3e",s:""},
+    {l:"Wrong KL Value",    v:"AED "+big(totWKLVal),c:"#e07020",s:"SL−KL > 21 days"},
+    {l:"Total Units",       v:fc(totQty),          c:"#1a3166",s:"units"},
+    {l:"Cats w/ KL Issues", v:flaggedCats,          c:"#c0392b",s:"categories flagged"},
+    {l:"Top Breaking Cat",  v:topCat,               c:"#7a55cc",s:"by NL value"}
+  ].map(k=>`<div style="padding:12px 14px;border-right:1px solid #eaedf5;text-align:center">
+    <div style="font-size:9px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#7a8aaa;margin-bottom:4px">${k.l}</div>
+    <div style="font-size:16px;font-weight:800;color:${k.c};line-height:1">${k.v}</div>
+    ${k.s?`<div style="font-size:10px;color:#9aaabb;margin-top:3px">${k.s}</div>`:""}
+  </div>`).join("");
+
+  // Build category map → collapse by cat+ot
+  const catMap={};
+  catRows.forEach(r=>{
+    if(!catMap[r.cat])catMap[r.cat]={cat:r.cat,dam:0,exp:0,qal:0,other:0,tot:0,wklVal:0,maxDiff:0};
+    const c=catMap[r.cat];
+    c.tot+=r.val; c.wklVal+=r.wrongKLVal; c.maxDiff=Math.max(c.maxDiff,r.maxDiff||0);
+    if(r.ot==="Damage")c.dam+=r.val;
+    else if(r.ot==="Expiry")c.exp+=r.val;
+    else if(r.ot==="Quality Rejection")c.qal+=r.val;
+    else c.other+=r.val;
+  });
+  const catArr=Object.values(catMap).sort((a,b)=>b.tot-a.tot);
+  const maxTot=catArr.length?catArr[0].tot:1;
+
+  // Category NL type table
+  document.getElementById("tb-breaking-cat").innerHTML=catArr.map((c,i)=>{
+    const hc=c.tot/maxTot>.7?'h1':c.tot/maxTot>.4?'h2':c.tot/maxTot>.2?'h3':'';
+    const kl=c.wklVal>0
+      ?`<span class="kl-flag">⚠ AED ${fc(c.wklVal)}</span>`
+      :`<span class="kl-ok">✓</span>`;
+    const bg=i%2?"#fff8f8":"#f8faff";
+    return`<tr style="background:${bg}">
+      <td style="font-weight:700;font-size:11px;cursor:pointer;color:#7a55cc;text-decoration:underline" onclick="setCat('${c.cat}')">${c.cat}</td>
+      <td class="r" style="color:#e07020">${c.dam?fc(c.dam):"—"}</td>
+      <td class="r ${hc}" style="color:#c0392b">${c.exp?fc(c.exp):"—"}</td>
+      <td class="r" style="color:#7a55cc">${c.qal?fc(c.qal):"—"}</td>
+      <td class="r" style="color:#9a9aaa">${c.other?fc(c.other):"—"}</td>
+      <td class="r" style="font-weight:800;color:#0d1b3e">${fc(c.tot)}</td>
+      <td class="r">${kl}</td>
+    </tr>`;
+  }).join("")+`<tr class="grand-tr">
+    <td>TOTAL</td>
+    <td class="r">${fc(catArr.reduce((s,c)=>s+c.dam,0))}</td>
+    <td class="r">${fc(catArr.reduce((s,c)=>s+c.exp,0))}</td>
+    <td class="r">${fc(catArr.reduce((s,c)=>s+c.qal,0))}</td>
+    <td class="r white">${fc(catArr.reduce((s,c)=>s+c.other,0))}</td>
+    <td class="r">${fc(catArr.reduce((s,c)=>s+c.tot,0))}</td>
+    <td class="r" style="color:#e07020">${catArr.reduce((s,c)=>s+c.wklVal,0)?`⚠ AED ${fc(catArr.reduce((s,c)=>s+c.wklVal,0))}`:""}</td>
+  </tr>`;
+
+  // Bottom Stores table
+  const storeArr=[...storeRows].sort((a,b)=>b.val-a.val).slice(0,10);
+  const otColor={"Expiry":"#c0392b","Damage":"#e07020","Quality Rejection":"#7a55cc","Liquidation":"#2175c8","Temp NL":"#2196a6","RTV":"#4a7a5a","TP Damage":"#8a5030","Mislable":"#9a9aaa"};
+  document.getElementById("tb-breaking-stores").innerHTML=storeArr.length?storeArr.map((s,i)=>{
+    const c=otColor[s.ot]||"#7a8aaa";
+    const kl=s.wrongKLVal>0
+      ?`<span class="kl-flag">⚠ ${fc(s.wrongKLVal)}<br><span style="font-size:9px">max ${s.maxDiff}d diff</span></span>`
+      :`<span class="kl-ok">✓</span>`;
+    const bg=i%2?"#f5f7ff":"#fff";
+    return`<tr style="background:${bg}">
+      <td>
+        <div style="font-weight:600;font-size:11px">${s.sn}</div>
+        <div style="font-family:monospace;font-size:10px;color:#9aaabb">${s.sc}</div>
+        ${cCat==="ALL"?`<div style="font-size:10px;color:#7a55cc;font-weight:600;margin-top:2px">${s.cat}</div>`:""}
+      </td>
+      <td class="r"><span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:${c}18;color:${c}">${s.ot}</span></td>
+      <td class="r m">${fc(s.qty)}</td>
+      <td class="r m" style="font-weight:700;color:#c9a227">${fc(s.val)}</td>
+      <td class="r m">${s.skus}</td>
+      <td class="r">${kl}</td>
+    </tr>`;
+  }).join("")
+  :`<tr><td colspan="6" style="text-align:center;padding:18px;color:#7a8aaa;font-style:italic">No store data for this selection. May 2026 has full store coverage.</td></tr>`;
+
+  // Wrong KL Alert
+  const klCats=catArr.filter(c=>c.wklVal>0);
+  const alertDiv=document.getElementById("wrongKLAlert");
+  if(klCats.length){
+    alertDiv.style.display="block";
+    document.getElementById("wrongKLBody").innerHTML=klCats.map(c=>{
+      const sev=c.maxDiff>90?"🔴 <strong>Critical</strong> — likely systematic KL master data error. Raise with Cataloguing team":
+                c.maxDiff>30?"🟠 <strong>High</strong> — verify KL setup in keep_life_new_table":
+                "🟡 <strong>Moderate</strong> — review affected SKUs";
+      return `&#8226; <strong>${c.cat}</strong> — Wrong KL exposure: AED ${fc(c.wklVal)} &nbsp;|&nbsp; Max SL−KL: ${c.maxDiff} days &nbsp;|&nbsp; ${sev}`;
+    }).join("<br>");
+  } else {
+    alertDiv.style.display="none";
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════════════
+window.addEventListener("DOMContentLoaded",()=>{
+  // Show stale data warning if D-1 date is beyond max embedded date
+  if(isStale){
+    const sb=document.getElementById("sb");
+    if(sb){
+      sb.style.display="block";
+      sb.innerHTML=`⚠ DATA STALE — Embedded data is current to <strong>${MAX_DATA_DATE}</strong> but today is <strong>${TODAY}</strong>. D-1 should be <strong>${D1_DATE}</strong>. Regenerate this file from BigQuery to get current data.`;
+    }
+  }
+  // Update period labels dynamically
+  document.getElementById("periodDisplay") && (document.getElementById("periodDisplay").textContent="");
+  // Default to D-1 on load
+  setPeriod("D1");
+  setMonth(CURR_MONTH in MONTH_LABELS ? CURR_MONTH : "2026-05");
+  renderBreaking();
+  startCountdown();
+});
+</script>
+</body>
+</html>
