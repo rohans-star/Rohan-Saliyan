@@ -43,8 +43,26 @@ jobs:
       # │  3. Name:  GCP_SA_KEY                                           │
       # │  4. Value: paste the full contents of your .json key file       │
       # └─────────────────────────────────────────────────────────────────┘
+      # Pass the secret as an env var (not inline) so multi-line JSON
+      # survives the YAML→shell boundary without corruption.
+      # printf '%s' avoids echo adding a trailing newline or mishandling \n.
       - name: Write BigQuery service-account key
-        run: echo '${{ secrets.GCP_SA_KEY }}' > /tmp/gcp_sa_key.json
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: printf '%s' "$GCP_SA_KEY" > /tmp/gcp_sa_key.json
+
+      # Verify the file is valid JSON before invoking Python
+      - name: Validate service-account key
+        run: |
+          python3 -c "
+          import json, sys
+          try:
+              json.load(open('/tmp/gcp_sa_key.json'))
+              print('✓ Service-account key is valid JSON')
+          except Exception as e:
+              print(f'✗ Invalid JSON in key file: {e}', file=sys.stderr)
+              sys.exit(1)
+          "
 
       # Run regenerate_dashboard.py — allowed to fail so the fallback step runs
       - name: Regenerate dashboard
