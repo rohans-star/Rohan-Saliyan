@@ -29,6 +29,7 @@ Exit codes:
 import argparse
 import logging
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
