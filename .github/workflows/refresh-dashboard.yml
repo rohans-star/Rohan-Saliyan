@@ -1,0 +1,99 @@
+name: Refresh NL Bucketing Dashboard
+
+on:
+  schedule:
+    # 06:05 Dubai time every day (Dubai = UTC+4, so 02:05 UTC)
+    - cron: '5 2 * * *'
+  workflow_dispatch:
+    # Also allows one-click manual run from the Actions tab
+
+permissions:
+  contents: write      # commit updated HTML back to repo
+  pages: write         # publish to GitHub Pages
+  id-token: write      # required by actions/deploy-pages
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # JOB 1 — Pull fresh data from BigQuery and rebuild the HTML
+  # ────────────────────────────────────────────────────────────────
+  regenerate:
+    name: Regenerate dashboard HTML
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so git push works cleanly
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Write the service-account JSON from the GitHub Secret.
+      # ┌─────────────────────────────────────────────────────────────────┐
+      # │  HOW TO ADD THE SECRET                                          │
+      # │  1. Go to: repo → Settings → Secrets and variables → Actions   │
+      # │  2. Click "New repository secret"                               │
+      # │  3. Name:  GCP_SA_KEY                                           │
+      # │  4. Value: paste the full contents of your .json key file       │
+      # └─────────────────────────────────────────────────────────────────┘
+      - name: Write BigQuery service-account key
+        run: echo '${{ secrets.GCP_SA_KEY }}' > /tmp/gcp_sa_key.json
+
+      # Run the existing regenerate_dashboard.py with its CLI interface:
+      #   --template  NL_Bucketing_Enhanced_11.template.html  (root of repo)
+      #   --output    Dashboard/NL_Bucketing_Enhanced_11.html  (served by Pages)
+      #   --service-account  /tmp/gcp_sa_key.json
+      - name: Regenerate dashboard
+        run: |
+          python3 regenerate_dashboard.py \
+            --template NL_Bucketing_Enhanced_11.template.html \
+            --output   Dashboard/NL_Bucketing_Enhanced_11.html \
+            --service-account /tmp/gcp_sa_key.json
+
+      # Shred the key as soon as the script finishes
+      - name: Remove service-account key
+        if: always()
+        run: shred -u /tmp/gcp_sa_key.json 2>/dev/null || rm -f /tmp/gcp_sa_key.json
+
+      # Commit the updated HTML back to main
+      - name: Commit refreshed dashboard
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Dashboard/NL_Bucketing_Enhanced_11.html
+          # Only commit if the file actually changed
+          if git diff --cached --quiet; then
+            echo "No data changes — skipping commit"
+          else
+            git commit -m "chore: auto-refresh dashboard $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
+
+      # Package the Dashboard/ folder for GitHub Pages deployment
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: Dashboard/
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 2 — Publish the Dashboard folder to GitHub Pages
+  # ────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: regenerate
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
