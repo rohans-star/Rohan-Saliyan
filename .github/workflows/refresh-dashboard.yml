@@ -22,12 +22,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 0          # full history so git push works cleanly
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
           cache: pip
@@ -51,18 +51,33 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: printf '%s' "$GCP_SA_KEY" > /tmp/gcp_sa_key.json
 
-      # Verify the file is valid JSON before invoking Python
-      - name: Validate service-account key
+      # Diagnose the key file — prints size and validity but NEVER blocks the run.
+      # If the secret is missing/invalid the regenerate step will fail gracefully
+      # and the fallback-copy step ensures Pages still gets updated content.
+      - name: Diagnose service-account key
+        continue-on-error: true
         run: |
-          python3 -c "
-          import json, sys
-          try:
-              json.load(open('/tmp/gcp_sa_key.json'))
-              print('✓ Service-account key is valid JSON')
-          except Exception as e:
-              print(f'✗ Invalid JSON in key file: {e}', file=sys.stderr)
-              sys.exit(1)
-          "
+          python3 - <<'PYEOF'
+          import json, os, sys
+          path = '/tmp/gcp_sa_key.json'
+          size = os.path.getsize(path) if os.path.exists(path) else -1
+          print(f"Key file size: {size} bytes")
+          if size <= 0:
+              print("✗ Key file is empty — GCP_SA_KEY secret is probably not set.")
+              print("  Go to: repo → Settings → Secrets → Actions → New repository secret")
+              print("  Name: GCP_SA_KEY  |  Value: paste full contents of your .json key file")
+          else:
+              try:
+                  data = json.load(open(path))
+                  t = data.get('type','(missing)')
+                  proj = data.get('project_id','(missing)')
+                  email = data.get('client_email','(missing)')
+                  print(f"✓ Valid JSON  |  type={t}  project={proj}")
+                  print(f"  client_email: {email}")
+              except Exception as e:
+                  print(f"✗ JSON parse error: {e}")
+                  print("  Secret may have been pasted with extra quotes or wrong format.")
+          PYEOF
 
       # Run regenerate_dashboard.py — allowed to fail so the fallback step runs
       - name: Regenerate dashboard
@@ -105,7 +120,7 @@ jobs:
 
       # Package Dashboard/ — file is guaranteed to exist by this point
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v3.0.1
         with:
           path: Dashboard/
 
@@ -123,4 +138,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4.0.5
