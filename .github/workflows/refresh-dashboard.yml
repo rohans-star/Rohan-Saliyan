@@ -80,9 +80,14 @@ jobs:
           PYEOF
 
       # Run regenerate_dashboard.py — allowed to fail so the fallback step runs
+      # BQ_PROJECT: auto-detected from service account key if left blank
+      # BQ_DATASET: change if your dataset name differs from 'fulfillment'
       - name: Regenerate dashboard
         id: regen
         continue-on-error: true
+        env:
+          BQ_PROJECT: ${{ secrets.BQ_PROJECT }}   # optional — leave unset to auto-detect from key
+          BQ_DATASET: ${{ secrets.BQ_DATASET || 'fulfillment' }}
         run: |
           python3 regenerate_dashboard.py \
             --template NL_Bucketing_Enhanced_11.template.html \
