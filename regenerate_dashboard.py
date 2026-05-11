@@ -2,526 +2,401 @@
 """
 regenerate_dashboard.py — NL Bucketing Dashboard Data Regenerator
 
-Generates fresh RAW JavaScript data arrays from BigQuery and injects them into
-the NL_Bucketing_Enhanced_11.template.html template, producing the final
-NL_Bucketing_Enhanced_11.html dashboard.
-
-Supports:
-  - BigQuery authentication via service account JSON or Application Default Credentials (ADC)
-  - Configurable template and output paths
-  - Comprehensive logging to stdout and optional log file
-  - Error handling and recovery
-  - Compatible with regen.sh wrapper script
+Queries BigQuery for the five JS arrays the dashboard template expects:
+  RAW            daily NL grain (90-day rolling window)
+  AM_RAW         monthly Area Manager roll-up
+  AM_STORES      store-level detail per AM
+  BREAKING_CAT   category × NL-type drill-down with wrong-KL flags
+  BREAKING_STORES store × category drill-down with wrong-KL flags
 
 Usage:
-  python3 regenerate_dashboard.py \\
-    --template /opt/nl_dashboard/NL_Bucketing_Enhanced_11.template.html \\
-    --output /var/www/html/NL_Bucketing_Enhanced_11.html \\
-    --service-account /opt/nl_dashboard/sa.json
+  python3 regenerate_dashboard.py \
+    --template NL_Bucketing_Enhanced_11.template.html \
+    --output   Dashboard/NL_Bucketing_Enhanced_11.html \
+    --service-account /path/to/sa.json   # omit to use ADC
 
-Exit codes:
-  0  Success
-  1  BigQuery error
-  2  Template/file error
-  3  Configuration error
+Exit codes: 0 success | 1 BQ error | 2 file error | 3 config error
 """
 
 import argparse
-import logging
 import json
+import logging
 import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional
 
 try:
     from google.cloud import bigquery
     from google.oauth2 import service_account
     import pandas as pd
 except ImportError as e:
-    print(f"[FATAL] Missing required package: {e}", file=sys.stderr)
-    print("[FATAL] Install with: pip install google-cloud-bigquery pandas", file=sys.stderr)
+    print(f"[FATAL] Missing package: {e}\n"
+          f"        pip install google-cloud-bigquery pandas db-dtypes", file=sys.stderr)
     sys.exit(3)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LOGGING CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 def setup_logging(log_file: Optional[str] = None) -> logging.Logger:
-    """Configure dual logging to stdout and optional file."""
-    logger = logging.getLogger("nl_dashboard_regen")
+    logger = logging.getLogger("nl_regen")
     logger.setLevel(logging.DEBUG)
-
-    # Console handler (INFO level)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-
-    # File handler (DEBUG level) if specified
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
     if log_file:
         try:
-            file_handler = logging.FileHandler(log_file, mode="a")
-            file_handler.setLevel(logging.DEBUG)
-            file_formatter = logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
-            )
-            file_handler.setFormatter(file_formatter)
-            logger.addHandler(file_handler)
-        except IOError as e:
-            print(f"[WARN] Could not open log file {log_file}: {e}", file=sys.stderr)
-
+            fh = logging.FileHandler(log_file, mode="a")
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        except IOError as exc:
+            print(f"[WARN] Cannot open log file {log_file}: {exc}", file=sys.stderr)
     return logger
 
+# ── BigQuery client ───────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-# BIGQUERY OPERATIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def create_bq_client(
-    service_account_json: Optional[str] = None,
-    logger: Optional[logging.Logger] = None
-) -> bigquery.Client:
-    """
-    Create a BigQuery client.
-    
-    Args:
-        service_account_json: Path to service account JSON. If None, uses ADC.
-        logger: Logger instance.
-    
-    Returns:
-        Authenticated BigQuery client.
-    
-    Raises:
-        Exception: If authentication fails.
-    """
-    if logger is None:
-        logger = logging.getLogger("nl_dashboard_regen")
-
+def create_bq_client(sa_json: Optional[str], logger: logging.Logger) -> bigquery.Client:
+    if sa_json and Path(sa_json).exists() and Path(sa_json).stat().st_size > 10:
+        logger.info(f"Authenticating with service account: {sa_json}")
+        creds = service_account.Credentials.from_service_account_file(sa_json)
+        client = bigquery.Client(credentials=creds, project=creds.project_id)
+    else:
+        logger.info("Authenticating with Application Default Credentials (ADC)")
+        client = bigquery.Client()
+    # Lightweight check — list datasets (first page only)
     try:
-        if service_account_json and Path(service_account_json).exists():
-            logger.info(f"Authenticating with service account: {service_account_json}")
-            credentials = service_account.Credentials.from_service_account_file(
-                service_account_json
-            )
-            client = bigquery.Client(credentials=credentials)
-        else:
-            logger.info("Authenticating with Application Default Credentials (ADC)")
-            client = bigquery.Client()
+        next(iter(client.list_datasets(max_results=1)), None)
+        logger.info("✓ BigQuery connection verified")
+    except Exception as exc:
+        logger.error(f"BigQuery connection check failed: {exc}")
+        raise
+    return client
 
-        # Test connection
-        client.get_dataset("_")
-        logger.info("✓ BigQuery authentication successful")
-        return client
+# ── Query helpers ─────────────────────────────────────────────────────────────
 
-    except Exception as e:
-        logger.error(f"BigQuery authentication failed: {e}")
+def run_query(client: bigquery.Client, sql: str,
+              label: str, logger: logging.Logger) -> list[dict]:
+    logger.info(f"  Running query: {label} …")
+    try:
+        df = client.query(sql).to_dataframe()
+        logger.info(f"  ✓ {label}: {len(df)} rows")
+        # Normalise types so json.dumps won't choke
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.strftime("%Y-%m-%d")
+            elif pd.api.types.is_integer_dtype(df[col]):
+                df[col] = df[col].astype(int)
+            elif pd.api.types.is_float_dtype(df[col]):
+                df[col] = df[col].round(2)
+        df = df.where(pd.notnull(df), None)
+        return df.to_dict(orient="records")
+    except Exception as exc:
+        logger.error(f"  ✗ Query '{label}' failed: {exc}")
         raise
 
-
-def fetch_dashboard_data(client: bigquery.Client, logger: logging.Logger) -> Dict[str, Any]:
-    """
-    Fetch all NL dashboard datasets from BigQuery.
-    
-    This is a template implementation. Customize queries based on your actual schema.
-    
-    Returns:
-        Dictionary with keys like 'nl_data', 'summary', 'details', etc.
-    """
-    data = {}
-    
-    try:
-        logger.info("Fetching NL dashboard datasets from BigQuery...")
-
-        # Example Query 1: Main NL data
-        query_nl = """
-        SELECT
-          bucket,
-          count,
-          percentage,
-          label
-        FROM `your_project.your_dataset.nl_bucketing_data`
-        WHERE date = CURRENT_DATE()
-        ORDER BY bucket
-        """
-        
-        logger.debug(f"Executing query: {query_nl[:80]}...")
-        df_nl = client.query(query_nl).to_dataframe()
-        data['nl_data'] = df_nl.to_dict(orient='records')
-        logger.info(f"✓ Fetched {len(df_nl)} rows of NL bucketing data")
-
-        # Example Query 2: Summary statistics
-        query_summary = """
-        SELECT
-          metric,
-          value,
-          updated_at
-        FROM `your_project.your_dataset.nl_summary_stats`
-        WHERE date = CURRENT_DATE()
-        """
-        
-        logger.debug(f"Executing query: {query_summary[:80]}...")
-        df_summary = client.query(query_summary).to_dataframe()
-        data['summary'] = df_summary.to_dict(orient='records')
-        logger.info(f"✓ Fetched {len(df_summary)} summary statistics")
-
-        # Example Query 3: Details
-        query_details = """
-        SELECT
-          id,
-          detail_key,
-          detail_value
-        FROM `your_project.your_dataset.nl_details`
-        WHERE date = CURRENT_DATE()
-        LIMIT 10000
-        """
-        
-        logger.debug(f"Executing query: {query_details[:80]}...")
-        df_details = client.query(query_details).to_dataframe()
-        data['details'] = df_details.to_dict(orient='records')
-        logger.info(f"✓ Fetched {len(df_details)} detail records")
-
-    except Exception as e:
-        logger.error(f"Failed to fetch BigQuery data: {e}")
-        raise
-
-    return data
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA TRANSFORMATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def generate_raw_arrays(data: Dict[str, Any], logger: logging.Logger) -> Dict[str, str]:
-    """
-    Convert fetched data into JavaScript RAW array strings.
-    
-    Args:
-        data: Dictionary from fetch_dashboard_data.
-        logger: Logger instance.
-    
-    Returns:
-        Dictionary with keys like 'RAW_NL_DATA', 'RAW_SUMMARY', etc.,
-        each containing a complete JavaScript array literal.
-    """
-    raw_arrays = {}
-
-    try:
-        # Generate RAW_NL_DATA
-        if 'nl_data' in data:
-            nl_records = data['nl_data']
-            raw_arrays['RAW_NL_DATA'] = _dict_to_js_array(nl_records)
-            logger.debug(f"✓ Generated RAW_NL_DATA with {len(nl_records)} records")
-
-        # Generate RAW_SUMMARY
-        if 'summary' in data:
-            summary_records = data['summary']
-            raw_arrays['RAW_SUMMARY'] = _dict_to_js_array(summary_records)
-            logger.debug(f"✓ Generated RAW_SUMMARY with {len(summary_records)} records")
-
-        # Generate RAW_DETAILS
-        if 'details' in data:
-            details_records = data['details']
-            raw_arrays['RAW_DETAILS'] = _dict_to_js_array(details_records)
-            logger.debug(f"✓ Generated RAW_DETAILS with {len(details_records)} records")
-
-        logger.info(f"✓ Generated {len(raw_arrays)} RAW arrays")
-
-    except Exception as e:
-        logger.error(f"Failed to generate RAW arrays: {e}")
-        raise
-
-    return raw_arrays
-
-
-def _dict_to_js_array(records: List[Dict[str, Any]]) -> str:
-    """
-    Convert a list of dictionaries to a JavaScript array literal.
-    
-    Example:
-        [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
-        becomes:
-        [
-          {"name":"Alice","age":30},
-          {"name":"Bob","age":25}
-        ]
-    """
-    if not records:
+def rows_to_js_array(rows: list[dict]) -> str:
+    """Serialise a list of dicts to a compact JS array literal."""
+    if not rows:
         return "[]"
+    lines = []
+    for r in rows:
+        lines.append("{" + ",".join(
+            f'"{k}":{json.dumps(v)}' for k, v in r.items()
+        ) + "}")
+    return "[\n" + ",\n".join(lines) + "\n]"
 
-    # Convert each record to JSON, handling special types
-    json_records = []
-    for record in records:
-        try:
-            # Handle pandas/numpy types
-            clean_record = {}
-            for key, value in record.items():
-                if pd.isna(value):
-                    clean_record[key] = None
-                elif hasattr(value, 'isoformat'):  # datetime objects
-                    clean_record[key] = value.isoformat()
-                else:
-                    clean_record[key] = value
+# ── BigQuery queries ──────────────────────────────────────────────────────────
+# All five match the variable names and field shapes the template JS expects.
+# Adjust table/column names to match your exact schema if needed.
 
-            json_records.append(json.dumps(clean_record, separators=(',', ':')))
-        except Exception:
-            # Fallback: convert to string
-            json_records.append(json.dumps(str(record), separators=(',', ':')))
+def build_queries(project: str, dataset: str) -> dict[str, str]:
+    p = f"`{project}.{dataset}"       # shorthand prefix
 
-    js_array = "[\n  " + ",\n  ".join(json_records) + "\n]"
-    return js_array
+    return {
 
+        # ── RAW ──────────────────────────────────────────────────────────────
+        # Shape: {date_, wk, cat, ff, pt, ot, qty, val, stores, skus}
+        "RAW": f"""
+        SELECT
+          FORMAT_DATE('%Y-%m-%d', DATE(created_at, 'Asia/Dubai'))   AS date_,
+          EXTRACT(ISOWEEK FROM DATE(created_at, 'Asia/Dubai'))       AS wk,
+          COALESCE(l2_category, '-')                                 AS cat,
+          IF(fefo_tracked, 'FEFO', 'NonFEFO')                       AS ff,
+          IF(partner_id = '9411', '9411', 'Non9411')                AS pt,
+          COALESCE(overview_type, 'Other')                          AS ot,
+          SUM(qty)                                                   AS qty,
+          ROUND(SUM(qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+          COUNT(DISTINCT d.store_code)                               AS stores,
+          COUNT(DISTINCT d.zsku)                                     AS skus
+        FROM {p}.DAM_line_date_new_final` d
+        LEFT JOIN {p}.txlog_cogs_output`  c
+          ON d.zsku = c.zsku AND d.store_code = c.store_code
+        WHERE DATE(d.created_at, 'Asia/Dubai')
+              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 90 DAY)
+                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+        GROUP BY 1, 2, 3, 4, 5, 6
+        ORDER BY 1 DESC, 7 DESC
+        """,
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE OPERATIONS
-# ══════════════════════════════════════════════════════════════════════════════
+        # ── AM_RAW ───────────────────────────────────────────────────────────
+        # Shape: {m, AM, asst, stores, qty, val, dam, exp, qal, lqd, rtv, tnl,
+        #         fefo, nfefo, ds, ins}
+        "AM_RAW": f"""
+        SELECT
+          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
+          COALESCE(mgr.am_name,   'Unassigned')                     AS AM,
+          COALESCE(mgr.asst_name, '—')                             AS asst,
+          COUNT(DISTINCT d.store_code)                              AS stores,
+          SUM(d.qty)                                                AS qty,
+          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+          ROUND(SUM(IF(d.overview_type='Damage',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS dam,
+          ROUND(SUM(IF(d.overview_type='Expiry',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS exp,
+          ROUND(SUM(IF(d.overview_type='Quality Rejection',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS qal,
+          ROUND(SUM(IF(d.overview_type='Liquidation',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS lqd,
+          ROUND(SUM(IF(d.overview_type='RTV',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS rtv,
+          ROUND(SUM(IF(d.overview_type='Temp NL',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS tnl,
+          ROUND(SUM(IF(d.fefo_tracked,
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS fefo,
+          ROUND(SUM(IF(NOT d.fefo_tracked,
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS nfefo,
+          ROUND(SUM(IF(d.bucket='DS',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS ds,
+          ROUND(SUM(IF(d.bucket='Instock',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS ins
+        FROM {p}.DAM_line_date_new_final` d
+        LEFT JOIN {p}.txlog_cogs_output` c
+          ON d.zsku = c.zsku AND d.store_code = c.store_code
+        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
+          ON d.store_code = mgr.store_code
+        WHERE DATE(d.created_at, 'Asia/Dubai')
+              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 120 DAY)
+                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+        GROUP BY 1, 2, 3
+        ORDER BY 1 DESC, 6 DESC
+        """,
 
-def load_template(template_path: str, logger: logging.Logger) -> str:
-    """Load and validate template file."""
-    try:
-        path = Path(template_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Template not found: {template_path}")
+        # ── AM_STORES ─────────────────────────────────────────────────────────
+        # Shape: {m, AM, sc, sn, qty, val, dam, exp, qal, lqd}
+        "AM_STORES": f"""
+        SELECT
+          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
+          COALESCE(mgr.am_name, 'Unassigned')                       AS AM,
+          d.store_code                                              AS sc,
+          COALESCE(mgr.store_name, d.store_code)                    AS sn,
+          SUM(d.qty)                                                AS qty,
+          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+          ROUND(SUM(IF(d.overview_type='Damage',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS dam,
+          ROUND(SUM(IF(d.overview_type='Expiry',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS exp,
+          ROUND(SUM(IF(d.overview_type='Quality Rejection',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS qal,
+          ROUND(SUM(IF(d.overview_type='Liquidation',
+            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS lqd
+        FROM {p}.DAM_line_date_new_final` d
+        LEFT JOIN {p}.txlog_cogs_output` c
+          ON d.zsku = c.zsku AND d.store_code = c.store_code
+        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
+          ON d.store_code = mgr.store_code
+        WHERE DATE(d.created_at, 'Asia/Dubai')
+              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
+                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+        GROUP BY 1, 2, 3, 4
+        ORDER BY 1 DESC, 6 DESC
+        """,
 
-        content = path.read_text(encoding='utf-8')
-        logger.info(f"✓ Loaded template: {template_path}")
-        return content
+        # ── BREAKING_CAT ─────────────────────────────────────────────────────
+        # Shape: {m, cat, ot, qty, val, stores, skus, wrongKL, wrongKLVal,
+        #         avgDiff, maxDiff}
+        "BREAKING_CAT": f"""
+        SELECT
+          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
+          COALESCE(d.l2_category, '-')                              AS cat,
+          COALESCE(d.overview_type, 'Other')                       AS ot,
+          SUM(d.qty)                                               AS qty,
+          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+          COUNT(DISTINCT d.store_code)                             AS stores,
+          COUNT(DISTINCT d.zsku)                                   AS skus,
+          COUNTIF(k.sl_date IS NOT NULL
+                  AND k.kl_date IS NOT NULL
+                  AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21)  AS wrongKL,
+          ROUND(SUM(
+            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL
+               AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21,
+               d.qty * COALESCE(c.closing_cost, d.cost_price), 0)
+          ), 2)                                                    AS wrongKLVal,
+          ROUND(AVG(
+            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
+               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
+          ), 1)                                                    AS avgDiff,
+          MAX(
+            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
+               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
+          )                                                        AS maxDiff
+        FROM {p}.DAM_line_date_new_final` d
+        LEFT JOIN {p}.txlog_cogs_output` c
+          ON d.zsku = c.zsku AND d.store_code = c.store_code
+        LEFT JOIN {p}.keep_life_new_table` k
+          ON d.zsku = k.zsku
+        WHERE DATE(d.created_at, 'Asia/Dubai')
+              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
+                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+        GROUP BY 1, 2, 3
+        ORDER BY 1 DESC, 5 DESC
+        """,
 
-    except Exception as e:
-        logger.error(f"Failed to load template: {e}")
-        raise
+        # ── BREAKING_STORES ───────────────────────────────────────────────────
+        # Shape: {m, cat, sc, sn, ot, qty, val, skus, wrongKL, wrongKLVal,
+        #         maxDiff}
+        "BREAKING_STORES": f"""
+        SELECT
+          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
+          COALESCE(d.l2_category, '-')                              AS cat,
+          d.store_code                                             AS sc,
+          COALESCE(mgr.store_name, d.store_code)                   AS sn,
+          COALESCE(d.overview_type, 'Other')                       AS ot,
+          SUM(d.qty)                                               AS qty,
+          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+          COUNT(DISTINCT d.zsku)                                   AS skus,
+          COUNTIF(k.sl_date IS NOT NULL
+                  AND k.kl_date IS NOT NULL
+                  AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21)  AS wrongKL,
+          ROUND(SUM(
+            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL
+               AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21,
+               d.qty * COALESCE(c.closing_cost, d.cost_price), 0)
+          ), 2)                                                    AS wrongKLVal,
+          MAX(
+            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
+               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
+          )                                                        AS maxDiff
+        FROM {p}.DAM_line_date_new_final` d
+        LEFT JOIN {p}.txlog_cogs_output` c
+          ON d.zsku = c.zsku AND d.store_code = c.store_code
+        LEFT JOIN {p}.keep_life_new_table` k
+          ON d.zsku = k.zsku
+        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
+          ON d.store_code = mgr.store_code
+        WHERE DATE(d.created_at, 'Asia/Dubai')
+              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
+                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+        GROUP BY 1, 2, 3, 4, 5
+        ORDER BY 1 DESC, 7 DESC
+        """,
+    }
 
+# ── Template patching ─────────────────────────────────────────────────────────
 
-def inject_raw_arrays(
-    template: str,
-    raw_arrays: Dict[str, str],
-    logger: logging.Logger
-) -> str:
-    """
-    Replace all RAW_* array placeholders in the template.
-    
-    Looks for patterns like:
-      const RAW_NL_DATA = [...];
-    
-    And replaces with generated content.
-    """
-    output = template
-    injected_count = 0
+def patch_array(html: str, var_name: str, new_array: str,
+                logger: logging.Logger) -> str:
+    """Replace  const VAR_NAME = [...];  with refreshed data."""
+    pattern = rf"(const {re.escape(var_name)}\s*=\s*)\[[\s\S]*?\](\s*;)"
+    result, n = re.subn(pattern, rf"\g<1>{new_array}\2", html, count=1)
+    if n == 0:
+        logger.warning(f"⚠ Placeholder 'const {var_name}' not found in template")
+    else:
+        logger.info(f"  ✓ Patched const {var_name}")
+    return result
 
-    try:
-        for array_name, array_content in raw_arrays.items():
-            # Pattern: const RAW_XXX = [...];
-            pattern = rf'(const\s+{array_name}\s*=\s*)\[.*?\](;)'
-            
-            # Use DOTALL flag to match across newlines
-            replacement = rf'\1{array_content}\2'
-            
-            new_output = re.sub(pattern, replacement, output, flags=re.DOTALL)
-            
-            if new_output != output:
-                injected_count += 1
-                output = new_output
-                logger.debug(f"✓ Injected {array_name}")
-            else:
-                logger.warning(f"⚠ No placeholder found for {array_name}")
+def patch_timestamps(html: str, logger: logging.Logger) -> str:
+    """Update the hard-coded generation date visible in the dashboard header."""
+    from datetime import date, timezone, timedelta
+    dubai_today = (datetime.now(timezone(timedelta(hours=4)))).strftime("%Y-%m-%d")
+    html = re.sub(r'Generated: \d{4}-\d{2}-\d{2}',
+                  f'Generated: {dubai_today}', html)
+    html = re.sub(r'Data last refreshed: \d{4}-\d{2}-\d{2}',
+                  f'Data last refreshed: {dubai_today}', html)
+    html = re.sub(r'(const MAX_DATA_DATE\s*=\s*")[^"]*(")',
+                  rf'\g<1>{dubai_today}\g<2>', html)
+    logger.info(f"  ✓ Updated timestamps to {dubai_today}")
+    return html
 
-        logger.info(f"✓ Injected {injected_count} RAW arrays into template")
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-    except Exception as e:
-        logger.error(f"Failed to inject RAW arrays: {e}")
-        raise
+def main(template_path: str, output_path: str,
+         sa_json: Optional[str], log_file: Optional[str]) -> int:
 
-    return output
-
-
-def inject_timestamp(html_content: str, logger: logging.Logger) -> str:
-    """
-    Update the generated timestamp in the HTML.
-    
-    Looks for patterns like:
-      <!-- Generated: 2026-05-11 12:34:56 UTC -->
-      id="generated_timestamp" value="2026-05-11T12:34:56Z"
-    """
-    now_utc = datetime.now(timezone.utc)
-    timestamp_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    timestamp_iso = now_utc.isoformat()
-
-    try:
-        # Update HTML comment
-        output = re.sub(
-            r'<!-- Generated:.*?-->',
-            f'<!-- Generated: {timestamp_str} -->',
-            html_content
-        )
-
-        # Update timestamp field (if it exists)
-        output = re.sub(
-            r'(id="generated_timestamp"\s+value=)"[^"]*"',
-            rf'\1"{timestamp_iso}"',
-            output
-        )
-
-        logger.info(f"✓ Updated timestamp: {timestamp_str}")
-        return output
-
-    except Exception as e:
-        logger.error(f"Failed to update timestamp: {e}")
-        raise
-
-
-def save_html(content: str, output_path: str, logger: logging.Logger) -> None:
-    """Save final HTML to disk."""
-    try:
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding='utf-8')
-        file_size = path.stat().st_size
-        logger.info(f"✓ Saved HTML output: {output_path} ({file_size} bytes)")
-
-    except Exception as e:
-        logger.error(f"Failed to save HTML: {e}")
-        raise
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN ORCHESTRATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def main(
-    template_path: str,
-    output_path: str,
-    service_account_json: Optional[str] = None,
-    log_file: Optional[str] = None
-) -> int:
-    """
-    Main regeneration workflow.
-    
-    Returns:
-        Exit code (0 for success, 1+ for failure).
-    """
     logger = setup_logging(log_file)
+    logger.info("═" * 65)
+    logger.info("NL Bucketing Dashboard — regeneration start")
+    logger.info("═" * 65)
 
     try:
-        logger.info("═" * 70)
-        logger.info("NL Dashboard Regeneration Starting")
-        logger.info("═" * 70)
+        # 1. Auth
+        logger.info("[1/4] Connecting to BigQuery …")
+        client = create_bq_client(sa_json, logger)
 
-        # Step 1: Create BigQuery client
-        logger.info("[1/5] Authenticating with BigQuery...")
-        client = create_bq_client(service_account_json, logger)
+        # 2. Queries — project/dataset from env or service-account project
+        project = os.environ.get("BQ_PROJECT") or client.project
+        dataset = os.environ.get("BQ_DATASET", "fulfillment")
+        logger.info(f"[2/4] Running queries on {project}.{dataset} …")
+        queries = build_queries(project, dataset)
+        arrays: dict[str, list[dict]] = {}
+        for name, sql in queries.items():
+            arrays[name] = run_query(client, sql, name, logger)
 
-        # Step 2: Fetch data
-        logger.info("[2/5] Fetching data from BigQuery...")
-        data = fetch_dashboard_data(client, logger)
+        # 3. Load template and inject all five arrays
+        logger.info("[3/4] Patching template …")
+        tmpl = Path(template_path)
+        if not tmpl.exists():
+            logger.error(f"Template not found: {template_path}")
+            return 2
+        html = tmpl.read_text(encoding="utf-8")
 
-        # Step 3: Generate RAW arrays
-        logger.info("[3/5] Generating JavaScript RAW arrays...")
-        raw_arrays = generate_raw_arrays(data, logger)
+        for var_name, rows in arrays.items():
+            html = patch_array(html, var_name, rows_to_js_array(rows), logger)
+        html = patch_timestamps(html, logger)
 
-        # Step 4: Load template and inject
-        logger.info("[4/5] Loading template and injecting data...")
-        template = load_template(template_path, logger)
-        html = inject_raw_arrays(template, raw_arrays, logger)
-        html = inject_timestamp(html, logger)
-
-        # Step 5: Save output
-        logger.info("[5/5] Saving final HTML...")
-        save_html(html, output_path, logger)
-
-        logger.info("═" * 70)
-        logger.info("✓ Regeneration completed successfully")
-        logger.info("═" * 70)
+        # 4. Write output
+        logger.info("[4/4] Writing output …")
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html, encoding="utf-8")
+        logger.info(f"✓ Saved {out} ({out.stat().st_size:,} bytes)")
+        logger.info("═" * 65)
+        logger.info("Regeneration complete")
+        logger.info("═" * 65)
         return 0
 
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
+    except FileNotFoundError as exc:
+        logger.error(f"File error: {exc}")
         return 2
-    except PermissionError as e:
-        logger.error(f"Permission denied: {e}")
-        return 2
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    except Exception as exc:
+        logger.error(f"Fatal: {exc}")
         logger.debug("", exc_info=True)
         return 1
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CLI ARGUMENT PARSING
-# ══════════════════════════════════════════════════════════════════════════════
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Regenerate NL Bucketing Dashboard from BigQuery")
+    p.add_argument("--template", required=True,
+                   help="Path to NL_Bucketing_Enhanced_11.template.html")
+    p.add_argument("--output", required=True,
+                   help="Output path for NL_Bucketing_Enhanced_11.html")
+    p.add_argument("--service-account", default=None,
+                   help="Path to GCP service-account JSON (omit to use ADC)")
+    p.add_argument("--log-file", default=None,
+                   help="Optional log file path")
+    return p.parse_args()
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Regenerate NL Bucketing Dashboard from BigQuery data",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # With service account
-  python3 regenerate_dashboard.py \\
-    --template ./NL_Bucketing_Enhanced_11.template.html \\
-    --output ./NL_Bucketing_Enhanced_11.html \\
-    --service-account ./sa.json
-
-  # With ADC (Application Default Credentials)
-  python3 regenerate_dashboard.py \\
-    --template ./NL_Bucketing_Enhanced_11.template.html \\
-    --output ./NL_Bucketing_Enhanced_11.html
-
-  # With logging to file
-  python3 regenerate_dashboard.py \\
-    --template ./NL_Bucketing_Enhanced_11.template.html \\
-    --output ./NL_Bucketing_Enhanced_11.html \\
-    --log-file ./regen.log
-        """
-    )
-
-    parser.add_argument(
-        '--template',
-        required=True,
-        help='Path to NL_Bucketing_Enhanced_11.template.html'
-    )
-    parser.add_argument(
-        '--output',
-        required=True,
-        help='Output path for NL_Bucketing_Enhanced_11.html'
-    )
-    parser.add_argument(
-        '--service-account',
-        default=None,
-        help='Path to BigQuery service account JSON (optional; uses ADC if not provided)'
-    )
-    parser.add_argument(
-        '--log-file',
-        default=None,
-        help='Optional log file path (defaults to stderr only)'
-    )
-
-    return parser.parse_args()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == '__main__':
-    args = parse_arguments()
-
-    # Check if log file is specified in environment (for regen.sh integration)
-    log_file = args.log_file or os.environ.get('REGEN_LOG')
-
-    exit_code = main(
+if __name__ == "__main__":
+    args = parse_args()
+    sys.exit(main(
         template_path=args.template,
         output_path=args.output,
-        service_account_json=args.service_account,
-        log_file=log_file
-    )
-
-    sys.exit(exit_code)
+        sa_json=args.service_account,
+        log_file=args.log_file or os.environ.get("REGEN_LOG"),
+    ))
