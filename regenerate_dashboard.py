@@ -2,12 +2,12 @@
 """
 regenerate_dashboard.py — NL Bucketing Dashboard Data Regenerator
 
-Queries BigQuery for the five JS arrays the dashboard template expects:
-  RAW            daily NL grain (90-day rolling window)
-  AM_RAW         monthly Area Manager roll-up
-  AM_STORES      store-level detail per AM
-  BREAKING_CAT   category × NL-type drill-down with wrong-KL flags
-  BREAKING_STORES store × category drill-down with wrong-KL flags
+Patches these JS variables in the template HTML:
+  RAW              daily NL grain (last 90 days)
+  DAILY_TREND      last 35 days aggregated by date
+  KL_DATA          KL-issue SKUs (SL−KL > 21 days)
+  AM_DATA          monthly AM roll-up object keyed by "YYYY-MM"
+  ORDERS_BY_PERIOD order count object (D1, WTD, MTD_YYYY_MM, YTD)
 
 Usage:
   python3 regenerate_dashboard.py \
@@ -24,7 +24,8 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,14 @@ except ImportError as e:
     print(f"[FATAL] Missing package: {e}\n"
           f"        pip install google-cloud-bigquery pandas db-dtypes", file=sys.stderr)
     sys.exit(3)
+
+# ── Fully-qualified BQ table references ──────────────────────────────────────
+
+DAM      = "`noonbinimksa.darkstore.DAM_line_date_new_final`"
+COGS     = "`noondwh.instant_instant_finance.txlog_cogs_output`"
+MANAGERS = "`noondwh.mxfulfillment_user_management.ops_logistic_fulfillment_managers`"
+ORDERS   = "`noonbinimksa.darkstore.odr_fulfillment_60_ae`"
+KL_TABLE = "`noondwh.instant_instant_catalog.keep_life_new_table`"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -68,7 +77,6 @@ def create_bq_client(sa_json: Optional[str], logger: logging.Logger) -> bigquery
     else:
         logger.info("Authenticating with Application Default Credentials (ADC)")
         client = bigquery.Client()
-    # Lightweight check — list datasets (first page only)
     try:
         next(iter(client.list_datasets(max_results=1)), None)
         logger.info("✓ BigQuery connection verified")
@@ -77,7 +85,7 @@ def create_bq_client(sa_json: Optional[str], logger: logging.Logger) -> bigquery
         raise
     return client
 
-# ── Query helpers ─────────────────────────────────────────────────────────────
+# ── Query runner ──────────────────────────────────────────────────────────────
 
 def run_query(client: bigquery.Client, sql: str,
               label: str, logger: logging.Logger) -> list[dict]:
@@ -85,7 +93,6 @@ def run_query(client: bigquery.Client, sql: str,
     try:
         df = client.query(sql).to_dataframe()
         logger.info(f"  ✓ {label}: {len(df)} rows")
-        # Normalise types so json.dumps won't choke
         for col in df.columns:
             if pd.api.types.is_datetime64_any_dtype(df[col]):
                 df[col] = df[col].dt.strftime("%Y-%m-%d")
@@ -99,220 +106,239 @@ def run_query(client: bigquery.Client, sql: str,
         logger.error(f"  ✗ Query '{label}' failed: {exc}")
         raise
 
+# ── BigQuery SQL ──────────────────────────────────────────────────────────────
+
+SQL_RAW = f"""
+SELECT
+  FORMAT_DATE('%Y-%m-%d', DATE(d.created_at, 'Asia/Dubai')) AS date_,
+  EXTRACT(ISOWEEK FROM DATE(d.created_at, 'Asia/Dubai'))    AS wk,
+  COALESCE(d.l2_category, '-')                              AS cat,
+  IF(d.fefo_tracked, 'FEFO', 'NonFEFO')                    AS ff,
+  IF(d.partner_id = '9411', '9411', 'Non9411')             AS pt,
+  COALESCE(d.overview_type, 'Other')                       AS ot,
+  SUM(d.qty)                                               AS qty,
+  ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
+  COUNT(DISTINCT d.store_code)                             AS stores,
+  COUNT(DISTINCT d.zsku)                                   AS skus
+FROM {DAM} d
+LEFT JOIN {COGS} c ON d.zsku = c.zsku AND d.store_code = c.store_code
+WHERE DATE(d.created_at, 'Asia/Dubai')
+      BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 90 DAY)
+          AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+GROUP BY 1,2,3,4,5,6
+ORDER BY 1 DESC, 7 DESC
+"""
+
+SQL_DAILY_TREND = f"""
+SELECT
+  FORMAT_DATE('%Y-%m-%d', DATE(d.created_at, 'Asia/Dubai')) AS d,
+  CAST(ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 0) AS INT64) AS total,
+  CAST(ROUND(SUM(IF(d.overview_type='Damage',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS dam,
+  CAST(ROUND(SUM(IF(d.overview_type='Expiry',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS exp,
+  CAST(ROUND(SUM(IF(d.overview_type='Quality Rejection',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS qal,
+  CAST(ROUND(SUM(IF(d.overview_type='Liquidation',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS lqd
+FROM {DAM} d
+LEFT JOIN {COGS} c ON d.zsku = c.zsku AND d.store_code = c.store_code
+WHERE DATE(d.created_at, 'Asia/Dubai')
+      BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 35 DAY)
+          AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+GROUP BY 1
+ORDER BY 1 ASC
+"""
+
+SQL_KL_DATA = f"""
+SELECT
+  COALESCE(d.l2_category, '-')                              AS cat,
+  COALESCE(d.overview_type, 'Other')                       AS ot,
+  COUNT(DISTINCT d.zsku)                                   AS flagged_skus,
+  SUM(d.qty)                                               AS qty,
+  CAST(ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 0) AS INT64) AS val,
+  ROUND(AVG(ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY))), 1) AS avg_diff,
+  MAX(ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)))           AS max_diff
+FROM {DAM} d
+LEFT JOIN {COGS} c ON d.zsku = c.zsku AND d.store_code = c.store_code
+JOIN {KL_TABLE} k ON d.zsku = k.zsku
+WHERE DATE(d.created_at, 'Asia/Dubai')
+      BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
+          AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+  AND k.sl_date IS NOT NULL
+  AND k.kl_date IS NOT NULL
+  AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21
+GROUP BY 1, 2
+ORDER BY 5 DESC
+"""
+
+SQL_AM_DATA = f"""
+SELECT
+  FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))   AS m,
+  COALESCE(mgr.am_name, 'Unassigned')                      AS AM,
+  COUNT(DISTINCT d.store_code)                             AS stores,
+  SUM(d.qty)                                               AS qty,
+  CAST(ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 0) AS INT64) AS val,
+  CAST(ROUND(SUM(IF(d.overview_type='Damage',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS dam,
+  CAST(ROUND(SUM(IF(d.overview_type='Expiry',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS exp,
+  CAST(ROUND(SUM(IF(d.overview_type='Quality Rejection',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS qal,
+  CAST(ROUND(SUM(IF(d.overview_type='Liquidation',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS lqd,
+  CAST(ROUND(SUM(IF(d.bucket='DS',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS ds,
+  CAST(ROUND(SUM(IF(d.bucket='Instock',
+    d.qty*COALESCE(c.closing_cost,d.cost_price),0)),0) AS INT64) AS ins,
+  COUNT(DISTINCT d.zsku)                                   AS skus
+FROM {DAM} d
+LEFT JOIN {COGS} c ON d.zsku = c.zsku AND d.store_code = c.store_code
+LEFT JOIN {MANAGERS} mgr ON d.store_code = mgr.store_code
+WHERE DATE(d.created_at, 'Asia/Dubai')
+      BETWEEN DATE_TRUNC(DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 3 MONTH), MONTH)
+          AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+GROUP BY 1, 2
+ORDER BY 1 DESC, 5 DESC
+"""
+
+SQL_ORDERS = f"""
+SELECT
+  FORMAT_DATE('%Y-%m-%d', CAST(date AS DATE)) AS d,
+  SUM(total_orders)                           AS orders
+FROM {ORDERS}
+WHERE country_code = 'ae'
+  AND CAST(date AS DATE)
+      BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
+          AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
+GROUP BY 1
+ORDER BY 1 ASC
+"""
+
+# ── JS value builders ──────────────────────────────────────────────────────────
+
 def rows_to_js_array(rows: list[dict]) -> str:
-    """Serialise a list of dicts to a compact JS array literal."""
     if not rows:
         return "[]"
-    lines = []
+    parts = []
     for r in rows:
-        lines.append("{" + ",".join(
-            f'"{k}":{json.dumps(v)}' for k, v in r.items()
-        ) + "}")
-    return "[\n" + ",\n".join(lines) + "\n]"
+        parts.append("{" + ",".join(f'"{k}":{json.dumps(v)}' for k, v in r.items()) + "}")
+    return "[\n" + ",\n".join(parts) + "\n]"
 
-# ── BigQuery queries ──────────────────────────────────────────────────────────
-# All five match the variable names and field shapes the template JS expects.
-# Adjust table/column names to match your exact schema if needed.
 
-def build_queries(project: str, dataset: str) -> dict[str, str]:
-    p = f"`{project}.{dataset}"       # shorthand prefix
+def build_am_data_js(rows: list[dict]) -> str:
+    """Group AM rows by month key and build a nested JS object."""
+    by_month: dict[str, list] = defaultdict(list)
+    for r in rows:
+        m = r["m"]
+        entry = {k: v for k, v in r.items() if k != "m"}
+        by_month[m].append(entry)
 
-    return {
+    parts = []
+    for month in sorted(by_month.keys(), reverse=True):
+        am_rows = by_month[month]
+        items = []
+        for r in am_rows:
+            items.append("    {" + ",".join(f'"{k}":{json.dumps(v)}' for k, v in r.items()) + "}")
+        arr = "[\n" + ",\n".join(items) + "\n  ]"
+        parts.append(f'  "{month}":{arr}')
 
-        # ── RAW ──────────────────────────────────────────────────────────────
-        # Shape: {date_, wk, cat, ff, pt, ot, qty, val, stores, skus}
-        "RAW": f"""
-        SELECT
-          FORMAT_DATE('%Y-%m-%d', DATE(created_at, 'Asia/Dubai'))   AS date_,
-          EXTRACT(ISOWEEK FROM DATE(created_at, 'Asia/Dubai'))       AS wk,
-          COALESCE(l2_category, '-')                                 AS cat,
-          IF(fefo_tracked, 'FEFO', 'NonFEFO')                       AS ff,
-          IF(partner_id = '9411', '9411', 'Non9411')                AS pt,
-          COALESCE(overview_type, 'Other')                          AS ot,
-          SUM(qty)                                                   AS qty,
-          ROUND(SUM(qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
-          COUNT(DISTINCT d.store_code)                               AS stores,
-          COUNT(DISTINCT d.zsku)                                     AS skus
-        FROM {p}.DAM_line_date_new_final` d
-        LEFT JOIN {p}.txlog_cogs_output`  c
-          ON d.zsku = c.zsku AND d.store_code = c.store_code
-        WHERE DATE(d.created_at, 'Asia/Dubai')
-              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 90 DAY)
-                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
-        GROUP BY 1, 2, 3, 4, 5, 6
-        ORDER BY 1 DESC, 7 DESC
-        """,
+    return "{\n" + ",\n".join(parts) + "\n}"
 
-        # ── AM_RAW ───────────────────────────────────────────────────────────
-        # Shape: {m, AM, asst, stores, qty, val, dam, exp, qal, lqd, rtv, tnl,
-        #         fefo, nfefo, ds, ins}
-        "AM_RAW": f"""
-        SELECT
-          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
-          COALESCE(mgr.am_name,   'Unassigned')                     AS AM,
-          COALESCE(mgr.asst_name, '—')                             AS asst,
-          COUNT(DISTINCT d.store_code)                              AS stores,
-          SUM(d.qty)                                                AS qty,
-          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
-          ROUND(SUM(IF(d.overview_type='Damage',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS dam,
-          ROUND(SUM(IF(d.overview_type='Expiry',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS exp,
-          ROUND(SUM(IF(d.overview_type='Quality Rejection',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS qal,
-          ROUND(SUM(IF(d.overview_type='Liquidation',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS lqd,
-          ROUND(SUM(IF(d.overview_type='RTV',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS rtv,
-          ROUND(SUM(IF(d.overview_type='Temp NL',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS tnl,
-          ROUND(SUM(IF(d.fefo_tracked,
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS fefo,
-          ROUND(SUM(IF(NOT d.fefo_tracked,
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS nfefo,
-          ROUND(SUM(IF(d.bucket='DS',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS ds,
-          ROUND(SUM(IF(d.bucket='Instock',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS ins
-        FROM {p}.DAM_line_date_new_final` d
-        LEFT JOIN {p}.txlog_cogs_output` c
-          ON d.zsku = c.zsku AND d.store_code = c.store_code
-        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
-          ON d.store_code = mgr.store_code
-        WHERE DATE(d.created_at, 'Asia/Dubai')
-              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 120 DAY)
-                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
-        GROUP BY 1, 2, 3
-        ORDER BY 1 DESC, 6 DESC
-        """,
 
-        # ── AM_STORES ─────────────────────────────────────────────────────────
-        # Shape: {m, AM, sc, sn, qty, val, dam, exp, qal, lqd}
-        "AM_STORES": f"""
-        SELECT
-          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
-          COALESCE(mgr.am_name, 'Unassigned')                       AS AM,
-          d.store_code                                              AS sc,
-          COALESCE(mgr.store_name, d.store_code)                    AS sn,
-          SUM(d.qty)                                                AS qty,
-          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
-          ROUND(SUM(IF(d.overview_type='Damage',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS dam,
-          ROUND(SUM(IF(d.overview_type='Expiry',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS exp,
-          ROUND(SUM(IF(d.overview_type='Quality Rejection',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS qal,
-          ROUND(SUM(IF(d.overview_type='Liquidation',
-            d.qty*COALESCE(c.closing_cost,d.cost_price), 0)), 2)   AS lqd
-        FROM {p}.DAM_line_date_new_final` d
-        LEFT JOIN {p}.txlog_cogs_output` c
-          ON d.zsku = c.zsku AND d.store_code = c.store_code
-        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
-          ON d.store_code = mgr.store_code
-        WHERE DATE(d.created_at, 'Asia/Dubai')
-              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
-                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
-        GROUP BY 1, 2, 3, 4
-        ORDER BY 1 DESC, 6 DESC
-        """,
+def build_orders_js(rows: list[dict]) -> str:
+    """Aggregate daily order rows into D1, WTD, MTD per month, YTD."""
+    dubai_tz = timezone(timedelta(hours=4))
+    today = datetime.now(dubai_tz).date()
+    yesterday = today - timedelta(days=1)
+    days_since_monday = yesterday.weekday()
+    monday = yesterday - timedelta(days=days_since_monday)
 
-        # ── BREAKING_CAT ─────────────────────────────────────────────────────
-        # Shape: {m, cat, ot, qty, val, stores, skus, wrongKL, wrongKLVal,
-        #         avgDiff, maxDiff}
-        "BREAKING_CAT": f"""
-        SELECT
-          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
-          COALESCE(d.l2_category, '-')                              AS cat,
-          COALESCE(d.overview_type, 'Other')                       AS ot,
-          SUM(d.qty)                                               AS qty,
-          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
-          COUNT(DISTINCT d.store_code)                             AS stores,
-          COUNT(DISTINCT d.zsku)                                   AS skus,
-          COUNTIF(k.sl_date IS NOT NULL
-                  AND k.kl_date IS NOT NULL
-                  AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21)  AS wrongKL,
-          ROUND(SUM(
-            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL
-               AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21,
-               d.qty * COALESCE(c.closing_cost, d.cost_price), 0)
-          ), 2)                                                    AS wrongKLVal,
-          ROUND(AVG(
-            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
-               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
-          ), 1)                                                    AS avgDiff,
-          MAX(
-            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
-               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
-          )                                                        AS maxDiff
-        FROM {p}.DAM_line_date_new_final` d
-        LEFT JOIN {p}.txlog_cogs_output` c
-          ON d.zsku = c.zsku AND d.store_code = c.store_code
-        LEFT JOIN {p}.keep_life_new_table` k
-          ON d.zsku = k.zsku
-        WHERE DATE(d.created_at, 'Asia/Dubai')
-              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
-                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
-        GROUP BY 1, 2, 3
-        ORDER BY 1 DESC, 5 DESC
-        """,
+    by_date: dict[str, int] = {r["d"]: int(r["orders"]) for r in rows}
 
-        # ── BREAKING_STORES ───────────────────────────────────────────────────
-        # Shape: {m, cat, sc, sn, ot, qty, val, skus, wrongKL, wrongKLVal,
-        #         maxDiff}
-        "BREAKING_STORES": f"""
-        SELECT
-          FORMAT_DATE('%Y-%m', DATE(d.created_at, 'Asia/Dubai'))    AS m,
-          COALESCE(d.l2_category, '-')                              AS cat,
-          d.store_code                                             AS sc,
-          COALESCE(mgr.store_name, d.store_code)                   AS sn,
-          COALESCE(d.overview_type, 'Other')                       AS ot,
-          SUM(d.qty)                                               AS qty,
-          ROUND(SUM(d.qty * COALESCE(c.closing_cost, d.cost_price)), 2) AS val,
-          COUNT(DISTINCT d.zsku)                                   AS skus,
-          COUNTIF(k.sl_date IS NOT NULL
-                  AND k.kl_date IS NOT NULL
-                  AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21)  AS wrongKL,
-          ROUND(SUM(
-            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL
-               AND DATE_DIFF(k.sl_date, k.kl_date, DAY) > 21,
-               d.qty * COALESCE(c.closing_cost, d.cost_price), 0)
-          ), 2)                                                    AS wrongKLVal,
-          MAX(
-            IF(k.sl_date IS NOT NULL AND k.kl_date IS NOT NULL,
-               ABS(DATE_DIFF(k.sl_date, k.kl_date, DAY)), NULL)
-          )                                                        AS maxDiff
-        FROM {p}.DAM_line_date_new_final` d
-        LEFT JOIN {p}.txlog_cogs_output` c
-          ON d.zsku = c.zsku AND d.store_code = c.store_code
-        LEFT JOIN {p}.keep_life_new_table` k
-          ON d.zsku = k.zsku
-        LEFT JOIN {p}.ops_logistic_fulfillment_managers` mgr
-          ON d.store_code = mgr.store_code
-        WHERE DATE(d.created_at, 'Asia/Dubai')
-              BETWEEN DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 60 DAY)
-                  AND DATE_SUB(CURRENT_DATE('Asia/Dubai'), INTERVAL 1 DAY)
-        GROUP BY 1, 2, 3, 4, 5
-        ORDER BY 1 DESC, 7 DESC
-        """,
-    }
+    d1 = by_date.get(yesterday.strftime("%Y-%m-%d"), 0)
+    wtd = sum(v for d, v in by_date.items() if d >= monday.strftime("%Y-%m-%d"))
+
+    by_month: dict[str, int] = defaultdict(int)
+    for d_str, v in by_date.items():
+        by_month[d_str[:7]] += v  # "YYYY-MM"
+
+    ytd = sum(by_date.values())
+
+    lines = [f"  D1: {d1}", f"  WTD: {wtd}"]
+    for m in sorted(by_month.keys()):
+        key = "MTD_" + m.replace("-", "_")
+        lines.append(f"  {key}: {by_month[m]}")
+    lines.append(f"  YTD: {ytd}")
+
+    return "{\n" + ",\n".join(lines) + "\n}"
 
 # ── Template patching ─────────────────────────────────────────────────────────
 
-def patch_array(html: str, var_name: str, new_array: str,
-                logger: logging.Logger) -> str:
-    """Replace  const VAR_NAME = [...];  with refreshed data."""
-    pattern = rf"(const {re.escape(var_name)}\s*=\s*)\[[\s\S]*?\](\s*;)"
-    result, n = re.subn(pattern, rf"\g<1>{new_array}\2", html, count=1)
-    if n == 0:
-        logger.warning(f"⚠ Placeholder 'const {var_name}' not found in template")
+def patch_js_var(html: str, var_name: str, new_value: str,
+                 logger: logging.Logger) -> str:
+    """
+    Replace  const VAR_NAME = <array_or_object>;  with new_value.
+    Uses bracket-depth tracking so nested [...] and {...} are handled correctly.
+    """
+    m = re.search(rf"const {re.escape(var_name)}\s*=\s*", html)
+    if not m:
+        logger.warning(f"⚠ Variable 'const {var_name}' not found in template")
+        return html
+
+    start = m.end()
+    if start >= len(html):
+        logger.warning(f"⚠ Unexpected end of file after 'const {var_name}'")
+        return html
+
+    open_char = html[start]
+    if open_char == '[':
+        open_b, close_b = '[', ']'
+    elif open_char == '{':
+        open_b, close_b = '{', '}'
     else:
-        logger.info(f"  ✓ Patched const {var_name}")
+        logger.warning(f"⚠ Unexpected initializer for 'const {var_name}': {html[start:start+20]!r}")
+        return html
+
+    # Walk forward tracking bracket depth; skip string contents
+    depth = 0
+    i = start
+    in_str = False
+    str_ch = None
+    while i < len(html):
+        ch = html[i]
+        if in_str:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == str_ch:
+                in_str = False
+        else:
+            if ch in ('"', "'", '`'):
+                in_str = True
+                str_ch = ch
+            elif ch == open_b:
+                depth += 1
+            elif ch == close_b:
+                depth -= 1
+                if depth == 0:
+                    break
+        i += 1
+
+    close_pos = i
+    semi = html.find(';', close_pos)
+    if semi == -1:
+        logger.warning(f"⚠ No semicolon found after 'const {var_name}' value")
+        return html
+
+    result = html[:m.start()] + f"const {var_name} = {new_value}" + html[semi + 1:]
+    logger.info(f"  ✓ Patched const {var_name}")
     return result
 
+
 def patch_timestamps(html: str, logger: logging.Logger) -> str:
-    """Update the hard-coded generation date visible in the dashboard header."""
-    from datetime import date, timezone, timedelta
-    dubai_today = (datetime.now(timezone(timedelta(hours=4)))).strftime("%Y-%m-%d")
+    dubai_tz = timezone(timedelta(hours=4))
+    dubai_today = datetime.now(dubai_tz).strftime("%Y-%m-%d")
     html = re.sub(r'Generated: \d{4}-\d{2}-\d{2}',
                   f'Generated: {dubai_today}', html)
     html = re.sub(r'Data last refreshed: \d{4}-\d{2}-\d{2}',
@@ -333,33 +359,36 @@ def main(template_path: str, output_path: str,
     logger.info("═" * 65)
 
     try:
-        # 1. Auth
-        logger.info("[1/4] Connecting to BigQuery …")
+        logger.info("[1/6] Connecting to BigQuery …")
         client = create_bq_client(sa_json, logger)
 
-        # 2. Queries — project/dataset from env or service-account project
-        project = os.environ.get("BQ_PROJECT") or client.project
-        dataset = os.environ.get("BQ_DATASET", "fulfillment")
-        logger.info(f"[2/4] Running queries on {project}.{dataset} …")
-        queries = build_queries(project, dataset)
-        arrays: dict[str, list[dict]] = {}
-        for name, sql in queries.items():
-            arrays[name] = run_query(client, sql, name, logger)
+        logger.info("[2/6] Querying RAW (90-day daily grain) …")
+        raw_js = rows_to_js_array(run_query(client, SQL_RAW, "RAW", logger))
 
-        # 3. Load template and inject all five arrays
-        logger.info("[3/4] Patching template …")
+        logger.info("[3/6] Querying DAILY_TREND (35-day daily totals) …")
+        trend_js = rows_to_js_array(run_query(client, SQL_DAILY_TREND, "DAILY_TREND", logger))
+
+        logger.info("[4/6] Querying KL_DATA (wrong-KL SKUs) …")
+        kl_js = rows_to_js_array(run_query(client, SQL_KL_DATA, "KL_DATA", logger))
+
+        logger.info("[5/6] Querying AM_DATA and ORDERS_BY_PERIOD …")
+        am_js = build_am_data_js(run_query(client, SQL_AM_DATA, "AM_DATA", logger))
+        orders_js = build_orders_js(run_query(client, SQL_ORDERS, "ORDERS_BY_PERIOD", logger))
+
+        logger.info("[6/6] Patching template …")
         tmpl = Path(template_path)
         if not tmpl.exists():
             logger.error(f"Template not found: {template_path}")
             return 2
         html = tmpl.read_text(encoding="utf-8")
 
-        for var_name, rows in arrays.items():
-            html = patch_array(html, var_name, rows_to_js_array(rows), logger)
+        html = patch_js_var(html, "RAW",              raw_js,    logger)
+        html = patch_js_var(html, "DAILY_TREND",      trend_js,  logger)
+        html = patch_js_var(html, "KL_DATA",          kl_js,     logger)
+        html = patch_js_var(html, "AM_DATA",          am_js,     logger)
+        html = patch_js_var(html, "ORDERS_BY_PERIOD", orders_js, logger)
         html = patch_timestamps(html, logger)
 
-        # 4. Write output
-        logger.info("[4/4] Writing output …")
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html, encoding="utf-8")
